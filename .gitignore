@@ -1,0 +1,33 @@
+# virtualenv
+
+/virtual_env/
+virtualenv/
+**/virtual_env/
+
+# Python artifacts
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+__pycache__/
+*.py[cod]
+
+# database
+*.db
+*.sqlite3
+*.sqlite
+
+#agents
+.codex
+.agents
+
+
+# notes
+summaries/
+
+
+#git artifacts
+. 
+
+
+# data folder
+data/
