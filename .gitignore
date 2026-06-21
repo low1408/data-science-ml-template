@@ -31,3 +31,8 @@ summaries/
 
 # data folder
 data/
+
+
+pyproject.toml
+
+tests/
