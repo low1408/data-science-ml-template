@@ -6,9 +6,17 @@ import sqlite3
 import pandas as pd
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
 class SQLiteDataLoader:
-    def __init__(self, db_path: str | Path) -> None:
-        self.db_path = Path(db_path)
+    def __init__(self, db_path: str | Path, base_path: str | Path = PROJECT_ROOT) -> None:
+        db_path = Path(db_path).expanduser()
+
+        if not db_path.is_absolute():
+            db_path = Path(base_path).expanduser() / db_path
+
+        self.db_path = db_path.resolve()
 
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found: {self.db_path}")
@@ -32,3 +40,8 @@ class SQLiteDataLoader:
             result = pd.read_sql_query(query, connection)
 
         return result["name"].tolist()
+
+    @staticmethod
+    def _quote_identifier(identifier: str) -> str:
+        escaped_identifier = identifier.replace('"', '""')
+        return f'"{escaped_identifier}"'
