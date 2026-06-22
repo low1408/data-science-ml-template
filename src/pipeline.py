@@ -24,7 +24,7 @@ from src.modeling import (
     save_model,
     train_baseline_models,
 )
-from src.preprocessing import FeatureColumns, build_model_pipeline
+from src.preprocessing import FeatureColumns, PreprocessingConfig, build_model_pipeline
 from src.validation import DataSchema, validate_dataframe
 
 logger = logging.getLogger(__name__)
@@ -34,11 +34,10 @@ def run_pipeline(
     dataframe: pd.DataFrame,
     *,
     target_column: str,
-    feature_columns: FeatureColumns,
     task: TaskType,
+    config: PreprocessingConfig,
     schema: DataSchema | None = None,
     test_size: float = 0.2,
-    scale_numeric: bool = False,
     stratify: bool = False,
     save_dir: str | Path | None = None,
     estimators: Mapping[str, BaseEstimator] | None = None,
@@ -51,21 +50,21 @@ def run_pipeline(
         Raw input data containing both features and target.
     target_column : str
         Name of the column to predict.
-    feature_columns : FeatureColumns
-        Column roles for preprocessing.
     task : TaskType
         ``"classification"`` or ``"regression"``.
+    config : PreprocessingConfig
+        Configuration for preprocessing.
     schema : DataSchema | None
         Optional validation schema.  When provided, the dataframe is
         validated **before** splitting.
     test_size : float
         Fraction of data held out for evaluation (default 0.2).
-    scale_numeric : bool
-        Whether to standardise numeric features (default False).
     stratify : bool
         Whether to stratify the train/test split by the target (default False).
     save_dir : str | Path | None
         If provided, fitted models are saved to this directory.
+    estimators : Mapping[str, BaseEstimator] | None
+        Optional estimators dictionary.
 
     Returns
     -------
@@ -93,8 +92,7 @@ def run_pipeline(
         x_train,
         y_train,
         task=task,
-        scale_numeric=scale_numeric,
-        feature_columns=feature_columns,
+        config=config,
         estimators=estimators,
     )
 

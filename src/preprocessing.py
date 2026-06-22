@@ -23,6 +23,16 @@ class FeatureColumns:
         object.__setattr__(self, "boolean", self.boolean or [])
 
 
+@dataclass(frozen=True)
+class PreprocessingConfig:
+    feature_columns: FeatureColumns
+    scale_numeric: bool = False
+    numeric_imputer_strategy: str = "median"
+    categorical_imputer_strategy: str = "most_frequent"
+    boolean_imputer_strategy: str = "most_frequent"
+    remainder: str = "drop"
+
+
 def _cast_to_object(values: pd.DataFrame | pd.Series) -> pd.DataFrame | pd.Series:
     return values.astype(object)
 
@@ -34,57 +44,46 @@ def _cast_to_int(values: pd.DataFrame | pd.Series) -> pd.DataFrame | pd.Series:
 def build_preprocessor(
     dataframe: pd.DataFrame,
     *,
-    scale_numeric: bool = False,
-    feature_columns: FeatureColumns | None = None,
-    numeric_columns: list[str] | None = None,
-    categorical_columns: list[str] | None = None,
-    boolean_columns: list[str] | None = None,
+    config: PreprocessingConfig,
 ) -> ColumnTransformer:
-    feature_columns = _resolve_feature_columns(
-        dataframe,
-        feature_columns=feature_columns,
-        numeric_columns=numeric_columns,
-        categorical_columns=categorical_columns,
-        boolean_columns=boolean_columns,
-    )
+    _validate_feature_columns(dataframe, config.feature_columns)
 
     numeric_steps: list[tuple[str, object]] = [
-        ("imputer", SimpleImputer(strategy="median")),
+        ("imputer", SimpleImputer(strategy=config.numeric_imputer_strategy)),
     ]
-    if scale_numeric:
+    if config.scale_numeric:
         numeric_steps.append(("scaler", StandardScaler()))
 
     categorical_pipeline = Pipeline(
         steps=[
-            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("imputer", SimpleImputer(strategy=config.categorical_imputer_strategy)),
             ("onehot", OneHotEncoder(handle_unknown="ignore")),
         ]
     )
     boolean_pipeline = Pipeline(
         steps=[
             ("to_object", FunctionTransformer(_cast_to_object)),
-            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("imputer", SimpleImputer(strategy=config.boolean_imputer_strategy)),
             ("to_int", FunctionTransformer(_cast_to_int)),
         ]
     )
 
     transformers: list[tuple[str, Pipeline, list[str]]] = []
-    if feature_columns.numeric:
-        transformers.append(("numeric", Pipeline(numeric_steps), feature_columns.numeric))
-    if feature_columns.categorical:
-        transformers.append(("categorical", categorical_pipeline, feature_columns.categorical))
-    if feature_columns.boolean:
-        transformers.append(("boolean", boolean_pipeline, feature_columns.boolean))
+    if config.feature_columns.numeric:
+        transformers.append(("numeric", Pipeline(numeric_steps), config.feature_columns.numeric))
+    if config.feature_columns.categorical:
+        transformers.append(("categorical", categorical_pipeline, config.feature_columns.categorical))
+    if config.feature_columns.boolean:
+        transformers.append(("boolean", boolean_pipeline, config.feature_columns.boolean))
 
-    return ColumnTransformer(transformers=transformers, remainder="drop")
+    return ColumnTransformer(transformers=transformers, remainder=config.remainder)
 
 
 def build_model_pipeline(
     estimator: object,
     dataframe: pd.DataFrame,
     *,
-    scale_numeric: bool = False,
-    feature_columns: FeatureColumns,
+    config: PreprocessingConfig,
 ) -> Pipeline:
     return Pipeline(
         steps=[
@@ -92,39 +91,13 @@ def build_model_pipeline(
                 "preprocessor",
                 build_preprocessor(
                     dataframe,
-                    scale_numeric=scale_numeric,
-                    feature_columns=feature_columns,
+                    config=config,
                 ),
             ),
             ("model", estimator),
         ]
     )
 
-
-def _resolve_feature_columns(
-    dataframe: pd.DataFrame,
-    *,
-    feature_columns: FeatureColumns | None,
-    numeric_columns: list[str] | None,
-    categorical_columns: list[str] | None,
-    boolean_columns: list[str] | None,
-) -> FeatureColumns:
-    if feature_columns is not None:
-        columns = feature_columns
-    elif numeric_columns is not None or categorical_columns is not None or boolean_columns is not None:
-        columns = FeatureColumns(
-            numeric=numeric_columns or [],
-            categorical=categorical_columns or [],
-            boolean=boolean_columns or [],
-        )
-    else:
-        raise ValueError(
-            "Feature columns must be configured explicitly. Pass a FeatureColumns instance via "
-            "feature_columns=, or supply numeric_columns/categorical_columns/boolean_columns."
-        )
-
-    _validate_feature_columns(dataframe, columns)
-    return columns
 
 
 def _validate_feature_columns(dataframe: pd.DataFrame, columns: FeatureColumns) -> None:

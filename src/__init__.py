@@ -22,9 +22,11 @@ from src.modeling import (
 )
 from src.preprocessing import (
     FeatureColumns,
+    PreprocessingConfig,
     build_model_pipeline,
     build_preprocessor,
 )
+from src.pipeline import run_pipeline
 from src.validation import (
     DataSchema,
     DataValidationError,
@@ -37,12 +39,14 @@ __all__ = [
     "CSVDataLoader",
     "DATA_DIR",
     "MODELS_DIR",
+    "PreprocessingConfig",
     "PROJECT_ROOT",
     "RANDOM_STATE",
     "DataSchema",
     "DataValidationError",
     "FeatureColumns",
     "ParquetDataLoader",
+    "run_pipeline",
     "SQLiteDataLoader",
     "TaskType",
     "ValidationResult",

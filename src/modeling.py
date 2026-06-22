@@ -13,7 +13,7 @@ from sklearn.linear_model import LinearRegression, LogisticRegression
 from src.config import MODELS_DIR, RANDOM_STATE
 from src.data import resolve_path
 from src.evaluation import TaskType, evaluate_model, model_comparison_table
-from src.preprocessing import FeatureColumns, build_model_pipeline
+from src.preprocessing import FeatureColumns, PreprocessingConfig, build_model_pipeline
 
 
 def baseline_estimators(task: TaskType) -> dict[str, BaseEstimator]:
@@ -38,25 +38,23 @@ def train_baseline_models(
     y_train: pd.Series,
     *,
     task: TaskType,
-    scale_numeric: bool = False,
-    feature_columns: FeatureColumns,
+    config: PreprocessingConfig,
     estimators: Mapping[str, BaseEstimator] | None = None,
 ) -> dict[str, BaseEstimator]:
     models: dict[str, BaseEstimator] = {}
-
     estimators_to_train = estimators if estimators is not None else baseline_estimators(task)
 
     for name, estimator in estimators_to_train.items():
         pipeline = build_model_pipeline(
             estimator,
             x_train,
-            scale_numeric=scale_numeric,
-            feature_columns=feature_columns,
+            config=config,
         )
         pipeline.fit(x_train, y_train)
         models[name] = pipeline
 
     return models
+
 
 
 def compare_models(
