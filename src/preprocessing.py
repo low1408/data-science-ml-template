@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import warnings
 from collections import Counter
 from dataclasses import dataclass
 
@@ -9,8 +8,6 @@ from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
-
-from src.config import RANDOM_STATE
 
 
 @dataclass(frozen=True)
@@ -116,48 +113,4 @@ def _validate_feature_columns(dataframe: pd.DataFrame, columns: FeatureColumns) 
         )
 
 
-# ── Backwards-compatible re-exports (F-08) ──────────────────────────────
-# split_features_target and train_test_split_dataframe have moved to src.data.
-# These re-exports preserve import compatibility but emit a DeprecationWarning.
 
-
-def split_features_target(
-    dataframe: pd.DataFrame,
-    target_column: str,
-) -> tuple[pd.DataFrame, pd.Series]:
-    """Deprecated: use ``from src.data import split_features_target`` instead."""
-    warnings.warn(
-        "Importing split_features_target from src.preprocessing is deprecated. "
-        "Import from src.data instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    from src.data import split_features_target as _split
-
-    return _split(dataframe, target_column)
-
-
-def train_test_split_dataframe(
-    dataframe: pd.DataFrame,
-    target_column: str,
-    *,
-    test_size: float = 0.2,
-    random_state: int = RANDOM_STATE,
-    stratify: bool = False,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-    """Deprecated: use ``from src.data import train_test_split_dataframe`` instead."""
-    warnings.warn(
-        "Importing train_test_split_dataframe from src.preprocessing is deprecated. "
-        "Import from src.data instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    from src.data import train_test_split_dataframe as _split
-
-    return _split(
-        dataframe,
-        target_column,
-        test_size=test_size,
-        random_state=random_state,
-        stratify=stratify,
-    )

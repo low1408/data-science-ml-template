@@ -63,9 +63,38 @@ def compare_models(
     y_test: pd.Series,
     *,
     task: TaskType,
+    pos_label: Any = None,
+    positive_label: Any = None,
 ) -> pd.DataFrame:
+    """Compare multiple models on test dataset.
+
+    Parameters
+    ----------
+    models : dict[str, BaseEstimator]
+        Dictionary of fitted estimators/pipelines.
+    x_test : pd.DataFrame
+        Test features.
+    y_test : pd.Series
+        Test target labels.
+    task : TaskType
+        Either "classification" or "regression".
+    pos_label : Any, default=None
+        The class label to treat as the positive class for binary classification.
+    positive_label : Any, default=None
+        Alias for pos_label. If specified, pos_label must be None.
+
+    Returns
+    -------
+    pd.DataFrame
+        Table comparing metrics for all models.
+    """
+    if positive_label is not None:
+        if pos_label is not None:
+            raise ValueError("Cannot specify both pos_label and positive_label.")
+        pos_label = positive_label
+
     results = {
-        name: evaluate_model(model, x_test, y_test, task=task)
+        name: evaluate_model(model, x_test, y_test, task=task, pos_label=pos_label)
         for name, model in models.items()
     }
     return model_comparison_table(results)

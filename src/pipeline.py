@@ -41,6 +41,8 @@ def run_pipeline(
     stratify: bool = False,
     save_dir: str | Path | None = None,
     estimators: Mapping[str, BaseEstimator] | None = None,
+    pos_label: Any = None,
+    positive_label: Any = None,
 ) -> dict[str, Any]:
     """Execute a full train-evaluate pipeline in the correct order.
 
@@ -65,6 +67,10 @@ def run_pipeline(
         If provided, fitted models are saved to this directory.
     estimators : Mapping[str, BaseEstimator] | None
         Optional estimators dictionary.
+    pos_label : Any, default=None
+        The class label to treat as the positive class for binary classification.
+    positive_label : Any, default=None
+        Alias for pos_label. If specified, pos_label must be None.
 
     Returns
     -------
@@ -72,6 +78,11 @@ def run_pipeline(
         ``{"models": ..., "comparison": ..., "x_train": ..., "x_test": ...,
         "y_train": ..., "y_test": ...}``
     """
+    if positive_label is not None:
+        if pos_label is not None:
+            raise ValueError("Cannot specify both pos_label and positive_label.")
+        pos_label = positive_label
+
     # 1. Validate ─────────────────────────────────────────────────────
     if schema is not None:
         logger.info("Validating dataframe against schema…")
@@ -98,7 +109,7 @@ def run_pipeline(
 
     # 4. Evaluate ─────────────────────────────────────────────────────
     logger.info("Evaluating %d models…", len(models))
-    comparison = compare_models(models, x_test, y_test, task=task)
+    comparison = compare_models(models, x_test, y_test, task=task, pos_label=pos_label)
     logger.info("Results:\n%s", comparison)
 
     # 5. Save (optional) ──────────────────────────────────────────────
