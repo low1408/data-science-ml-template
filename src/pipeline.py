@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import pandas as pd
 from sklearn.base import BaseEstimator
@@ -41,6 +41,7 @@ def run_pipeline(
     scale_numeric: bool = False,
     stratify: bool = False,
     save_dir: str | Path | None = None,
+    estimators: Mapping[str, BaseEstimator] | None = None,
 ) -> dict[str, Any]:
     """Execute a full train-evaluate pipeline in the correct order.
 
@@ -94,6 +95,7 @@ def run_pipeline(
         task=task,
         scale_numeric=scale_numeric,
         feature_columns=feature_columns,
+        estimators=estimators,
     )
 
     # 4. Evaluate ─────────────────────────────────────────────────────

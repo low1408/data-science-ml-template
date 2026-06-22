@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import joblib
 import pandas as pd
@@ -40,10 +40,13 @@ def train_baseline_models(
     task: TaskType,
     scale_numeric: bool = False,
     feature_columns: FeatureColumns,
+    estimators: Mapping[str, BaseEstimator] | None = None,
 ) -> dict[str, BaseEstimator]:
     models: dict[str, BaseEstimator] = {}
 
-    for name, estimator in baseline_estimators(task).items():
+    estimators_to_train = estimators if estimators is not None else baseline_estimators(task)
+
+    for name, estimator in estimators_to_train.items():
         pipeline = build_model_pipeline(
             estimator,
             x_train,
