@@ -73,6 +73,14 @@ def train_test_split_dataframe(
     )
 
 
+def _cast_to_object(values: pd.DataFrame | pd.Series) -> pd.DataFrame | pd.Series:
+    return values.astype(object)
+
+
+def _cast_to_int(values: pd.DataFrame | pd.Series) -> pd.DataFrame | pd.Series:
+    return values.astype(int)
+
+
 def build_preprocessor(
     dataframe: pd.DataFrame,
     *,
@@ -104,9 +112,9 @@ def build_preprocessor(
     )
     boolean_pipeline = Pipeline(
         steps=[
-            ("to_object", FunctionTransformer(lambda values: values.astype(object))),
+            ("to_object", FunctionTransformer(_cast_to_object)),
             ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("to_int", FunctionTransformer(lambda values: values.astype(int))),
+            ("to_int", FunctionTransformer(_cast_to_int)),
         ]
     )
 

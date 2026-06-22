@@ -11,6 +11,7 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression
 
 from src.config import MODELS_DIR, RANDOM_STATE
+from src.data import resolve_path
 from src.evaluation import evaluate_model, model_comparison_table
 from src.preprocessing import FeatureColumns, build_model_pipeline
 
@@ -81,19 +82,12 @@ def save_model(
     *,
     base_path: str | Path = MODELS_DIR,
 ) -> Path:
-    path = _resolve_output_path(file_path, base_path)
+    path = resolve_path(file_path, base_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(model, path)
     return path
 
 
 def load_model(file_path: str | Path, *, base_path: str | Path = MODELS_DIR) -> Any:
-    path = _resolve_output_path(file_path, base_path)
+    path = resolve_path(file_path, base_path)
     return joblib.load(path)
-
-
-def _resolve_output_path(file_path: str | Path, base_path: str | Path) -> Path:
-    path = Path(file_path).expanduser()
-    if not path.is_absolute():
-        path = Path(base_path).expanduser() / path
-    return path.resolve()
