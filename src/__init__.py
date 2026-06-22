@@ -14,9 +14,12 @@ from src.modeling import (
     train_baseline_models,
 )
 from src.preprocessing import (
+    FeatureColumns,
     build_model_pipeline,
     build_preprocessor,
     detect_column_types,
+    get_default_feature_columns,
+    set_default_feature_columns,
     split_features_target,
     train_test_split_dataframe,
 )
@@ -36,6 +39,7 @@ __all__ = [
     "RANDOM_STATE",
     "DataSchema",
     "DataValidationError",
+    "FeatureColumns",
     "ParquetDataLoader",
     "SQLiteDataLoader",
     "ValidationResult",
@@ -47,10 +51,12 @@ __all__ = [
     "dataset_summary",
     "detect_column_types",
     "evaluate_model",
+    "get_default_feature_columns",
     "load_model",
     "model_comparison_table",
     "regression_metrics",
     "save_model",
+    "set_default_feature_columns",
     "split_features_target",
     "train_baseline_models",
     "train_test_split_dataframe",

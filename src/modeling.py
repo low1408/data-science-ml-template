@@ -12,7 +12,7 @@ from sklearn.linear_model import LinearRegression, LogisticRegression
 
 from src.config import MODELS_DIR, RANDOM_STATE
 from src.evaluation import evaluate_model, model_comparison_table
-from src.preprocessing import build_model_pipeline
+from src.preprocessing import FeatureColumns, build_model_pipeline
 
 
 def baseline_estimators(task: str) -> dict[str, BaseEstimator]:
@@ -38,6 +38,11 @@ def train_baseline_models(
     *,
     task: str,
     scale_numeric: bool = False,
+    feature_columns: FeatureColumns | None = None,
+    numeric_columns: list[str] | None = None,
+    categorical_columns: list[str] | None = None,
+    boolean_columns: list[str] | None = None,
+    auto_detect: bool = False,
 ) -> dict[str, BaseEstimator]:
     models: dict[str, BaseEstimator] = {}
 
@@ -46,6 +51,11 @@ def train_baseline_models(
             estimator,
             x_train,
             scale_numeric=scale_numeric,
+            feature_columns=feature_columns,
+            numeric_columns=numeric_columns,
+            categorical_columns=categorical_columns,
+            boolean_columns=boolean_columns,
+            auto_detect=auto_detect,
         )
         pipeline.fit(x_train, y_train)
         models[name] = pipeline

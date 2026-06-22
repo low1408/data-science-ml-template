@@ -7,3 +7,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
 MODELS_DIR = PROJECT_ROOT / "models"
 RANDOM_STATE = 128
+
+# Global feature column configuration
+NUMERIC_COLUMNS: list[str] | None = None
+CATEGORICAL_COLUMNS: list[str] | None = None
+BOOLEAN_COLUMNS: list[str] | None = None
+
+
