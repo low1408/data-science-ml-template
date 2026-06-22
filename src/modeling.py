@@ -12,11 +12,11 @@ from sklearn.linear_model import LinearRegression, LogisticRegression
 
 from src.config import MODELS_DIR, RANDOM_STATE
 from src.data import resolve_path
-from src.evaluation import evaluate_model, model_comparison_table
+from src.evaluation import TaskType, evaluate_model, model_comparison_table
 from src.preprocessing import FeatureColumns, build_model_pipeline
 
 
-def baseline_estimators(task: str) -> dict[str, BaseEstimator]:
+def baseline_estimators(task: TaskType) -> dict[str, BaseEstimator]:
     if task == "classification":
         return {
             "dummy": DummyClassifier(strategy="most_frequent"),
@@ -37,12 +37,9 @@ def train_baseline_models(
     x_train: pd.DataFrame,
     y_train: pd.Series,
     *,
-    task: str,
+    task: TaskType,
     scale_numeric: bool = False,
-    feature_columns: FeatureColumns | None = None,
-    numeric_columns: list[str] | None = None,
-    categorical_columns: list[str] | None = None,
-    boolean_columns: list[str] | None = None,
+    feature_columns: FeatureColumns,
 ) -> dict[str, BaseEstimator]:
     models: dict[str, BaseEstimator] = {}
 
@@ -52,9 +49,6 @@ def train_baseline_models(
             x_train,
             scale_numeric=scale_numeric,
             feature_columns=feature_columns,
-            numeric_columns=numeric_columns,
-            categorical_columns=categorical_columns,
-            boolean_columns=boolean_columns,
         )
         pipeline.fit(x_train, y_train)
         models[name] = pipeline
@@ -67,7 +61,7 @@ def compare_models(
     x_test: pd.DataFrame,
     y_test: pd.Series,
     *,
-    task: str,
+    task: TaskType,
 ) -> pd.DataFrame:
     results = {
         name: evaluate_model(model, x_test, y_test, task=task)

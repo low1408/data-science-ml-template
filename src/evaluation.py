@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
+import warnings
 from collections.abc import Iterable
 from math import sqrt
-from typing import Any
+from typing import Any, Literal
 
+import numpy as np
 import pandas as pd
 from sklearn.metrics import (
     accuracy_score,
@@ -16,11 +19,15 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+logger = logging.getLogger(__name__)
+
+TaskType = Literal["classification", "regression"]
+
 
 def classification_metrics(
     y_true: Iterable[Any],
     y_pred: Iterable[Any],
-    y_score: Iterable[float] | None = None,
+    y_score: np.ndarray | Iterable[float] | None = None,
 ) -> dict[str, float]:
     metrics = {
         "accuracy": accuracy_score(y_true, y_pred),
@@ -31,9 +38,20 @@ def classification_metrics(
 
     if y_score is not None:
         try:
-            metrics["roc_auc"] = roc_auc_score(y_true, y_score)
-        except ValueError:
-            pass
+            y_score_array = np.asarray(y_score)
+            if y_score_array.ndim == 2 and y_score_array.shape[1] > 2:
+                # Multi-class: use one-vs-rest AUC
+                metrics["roc_auc"] = roc_auc_score(
+                    y_true, y_score_array, multi_class="ovr", average="weighted"
+                )
+            else:
+                metrics["roc_auc"] = roc_auc_score(y_true, y_score)
+        except ValueError as exc:
+            warnings.warn(
+                f"ROC-AUC could not be computed and was omitted: {exc}",
+                stacklevel=2,
+            )
+            logger.warning("ROC-AUC skipped: %s", exc)
 
     return {name: float(value) for name, value in metrics.items()}
 
@@ -54,7 +72,7 @@ def evaluate_model(
     x_test: pd.DataFrame,
     y_test: pd.Series,
     *,
-    task: str,
+    task: TaskType,
 ) -> dict[str, float]:
     y_pred = model.predict(x_test)
 
@@ -71,11 +89,13 @@ def model_comparison_table(results: dict[str, dict[str, float]]) -> pd.DataFrame
     return pd.DataFrame.from_dict(results, orient="index").rename_axis("model")
 
 
-def _predict_scores(model: object, x_test: pd.DataFrame) -> Iterable[float] | None:
+def _predict_scores(model: object, x_test: pd.DataFrame) -> np.ndarray | None:
     if hasattr(model, "predict_proba"):
         probabilities = model.predict_proba(x_test)
         if probabilities.shape[1] == 2:
             return probabilities[:, 1]
+        # Multi-class: return full probability matrix for OvR AUC
+        return probabilities
 
     if hasattr(model, "decision_function"):
         return model.decision_function(x_test)

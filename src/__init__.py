@@ -1,6 +1,13 @@
 from src.config import DATA_DIR, MODELS_DIR, PROJECT_ROOT, RANDOM_STATE
-from src.data import CSVDataLoader, ParquetDataLoader, SQLiteDataLoader
+from src.data import (
+    CSVDataLoader,
+    ParquetDataLoader,
+    SQLiteDataLoader,
+    split_features_target,
+    train_test_split_dataframe,
+)
 from src.evaluation import (
+    TaskType,
     classification_metrics,
     evaluate_model,
     model_comparison_table,
@@ -17,9 +24,6 @@ from src.preprocessing import (
     FeatureColumns,
     build_model_pipeline,
     build_preprocessor,
-    get_default_feature_columns,
-    split_features_target,
-    train_test_split_dataframe,
 )
 from src.validation import (
     DataSchema,
@@ -40,6 +44,7 @@ __all__ = [
     "FeatureColumns",
     "ParquetDataLoader",
     "SQLiteDataLoader",
+    "TaskType",
     "ValidationResult",
     "baseline_estimators",
     "build_model_pipeline",
@@ -48,7 +53,6 @@ __all__ = [
     "compare_models",
     "dataset_summary",
     "evaluate_model",
-    "get_default_feature_columns",
     "load_model",
     "model_comparison_table",
     "regression_metrics",
