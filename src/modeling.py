@@ -42,7 +42,6 @@ def train_baseline_models(
     numeric_columns: list[str] | None = None,
     categorical_columns: list[str] | None = None,
     boolean_columns: list[str] | None = None,
-    auto_detect: bool = False,
 ) -> dict[str, BaseEstimator]:
     models: dict[str, BaseEstimator] = {}
 
@@ -55,7 +54,6 @@ def train_baseline_models(
             numeric_columns=numeric_columns,
             categorical_columns=categorical_columns,
             boolean_columns=boolean_columns,
-            auto_detect=auto_detect,
         )
         pipeline.fit(x_train, y_train)
         models[name] = pipeline

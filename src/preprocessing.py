@@ -3,12 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pandas as pd
-from pandas.api.types import (
-    is_bool_dtype,
-    is_datetime64_any_dtype,
-    is_numeric_dtype,
-    is_string_dtype,
-)
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
@@ -19,15 +13,6 @@ from src.config import RANDOM_STATE
 
 
 @dataclass(frozen=True)
-class ColumnTypes:
-    numeric: list[str]
-    categorical: list[str]
-    datetime: list[str]
-    boolean: list[str]
-    text: list[str]
-
-
-@dataclass(frozen=True)
 class FeatureColumns:
     numeric: list[str]
     categorical: list[str]
@@ -35,9 +20,6 @@ class FeatureColumns:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "boolean", self.boolean or [])
-
-
-DEFAULT_FEATURE_COLUMNS: FeatureColumns | None = None
 
 
 def get_default_feature_columns() -> FeatureColumns | None:
@@ -58,53 +40,7 @@ def get_default_feature_columns() -> FeatureColumns | None:
             boolean=config_boolean or [],
         )
 
-    return DEFAULT_FEATURE_COLUMNS
-
-
-def set_default_feature_columns(
-    *,
-    numeric_columns: list[str],
-    categorical_columns: list[str],
-    boolean_columns: list[str] | None = None,
-) -> FeatureColumns:
-    global DEFAULT_FEATURE_COLUMNS
-
-    DEFAULT_FEATURE_COLUMNS = FeatureColumns(
-        numeric=numeric_columns,
-        categorical=categorical_columns,
-        boolean=boolean_columns,
-    )
-    return DEFAULT_FEATURE_COLUMNS
-
-
-def detect_column_types(dataframe: pd.DataFrame) -> ColumnTypes:
-    numeric: list[str] = []
-    categorical: list[str] = []
-    datetime: list[str] = []
-    boolean: list[str] = []
-    text: list[str] = []
-
-    for column in dataframe.columns:
-        series = dataframe[column]
-        if is_bool_dtype(series):
-            boolean.append(column)
-        elif is_datetime64_any_dtype(series):
-            datetime.append(column)
-        elif is_numeric_dtype(series):
-            numeric.append(column)
-        elif is_string_dtype(series):
-            text.append(column)
-            categorical.append(column)
-        else:
-            categorical.append(column)
-
-    return ColumnTypes(
-        numeric=numeric,
-        categorical=categorical,
-        datetime=datetime,
-        boolean=boolean,
-        text=text,
-    )
+    return None
 
 
 def split_features_target(
@@ -145,7 +81,6 @@ def build_preprocessor(
     numeric_columns: list[str] | None = None,
     categorical_columns: list[str] | None = None,
     boolean_columns: list[str] | None = None,
-    auto_detect: bool = False,
 ) -> ColumnTransformer:
     feature_columns = _resolve_feature_columns(
         dataframe,
@@ -153,7 +88,6 @@ def build_preprocessor(
         numeric_columns=numeric_columns,
         categorical_columns=categorical_columns,
         boolean_columns=boolean_columns,
-        auto_detect=auto_detect,
     )
 
     numeric_steps: list[tuple[str, object]] = [
@@ -196,7 +130,6 @@ def build_model_pipeline(
     numeric_columns: list[str] | None = None,
     categorical_columns: list[str] | None = None,
     boolean_columns: list[str] | None = None,
-    auto_detect: bool = False,
 ) -> Pipeline:
     return Pipeline(
         steps=[
@@ -209,7 +142,6 @@ def build_model_pipeline(
                     numeric_columns=numeric_columns,
                     categorical_columns=categorical_columns,
                     boolean_columns=boolean_columns,
-                    auto_detect=auto_detect,
                 ),
             ),
             ("model", estimator),
@@ -224,7 +156,6 @@ def _resolve_feature_columns(
     numeric_columns: list[str] | None,
     categorical_columns: list[str] | None,
     boolean_columns: list[str] | None,
-    auto_detect: bool,
 ) -> FeatureColumns:
     if feature_columns is not None:
         columns = feature_columns
@@ -236,19 +167,11 @@ def _resolve_feature_columns(
         )
     elif (default_cols := get_default_feature_columns()) is not None:
         columns = default_cols
-    elif auto_detect:
-        detected = detect_column_types(dataframe)
-        columns = FeatureColumns(
-            numeric=detected.numeric,
-            categorical=detected.categorical,
-            boolean=detected.boolean,
-        )
     else:
         raise ValueError(
             "Feature columns must be configured explicitly. Pass feature_columns, "
-            "pass numeric_columns/categorical_columns/boolean_columns, call "
-            "set_default_feature_columns(...), configure config.NUMERIC_COLUMNS / "
-            "config.CATEGORICAL_COLUMNS / config.BOOLEAN_COLUMNS, or set auto_detect=True."
+            "pass numeric_columns/categorical_columns/boolean_columns, or configure "
+            "config.NUMERIC_COLUMNS / config.CATEGORICAL_COLUMNS / config.BOOLEAN_COLUMNS."
         )
 
     _validate_feature_columns(dataframe, columns)
