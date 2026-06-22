@@ -9,6 +9,7 @@ if they need more control.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 from pathlib import Path
 from typing import Any, Mapping
@@ -17,17 +18,29 @@ import pandas as pd
 from sklearn.base import BaseEstimator
 
 from src.data import split_features_target, train_test_split_dataframe
-from src.evaluation import TaskType
+from src.artifacts import save_model
+from src.evaluation import TaskType, compare_models
 from src.modeling import (
     baseline_estimators,
-    compare_models,
-    save_model,
     train_baseline_models,
 )
 from src.preprocessing import FeatureColumns, PreprocessingConfig, build_model_pipeline
 from src.validation import DataSchema, validate_dataframe
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PipelineResult:
+    """Dataclass holding the results of a pipeline execution (F-9)."""
+
+    models: dict[str, BaseEstimator]
+    comparison: pd.DataFrame
+    x_train: pd.DataFrame
+    x_test: pd.DataFrame
+    y_train: pd.Series
+    y_test: pd.Series
+
 
 
 def run_pipeline(
@@ -43,7 +56,8 @@ def run_pipeline(
     estimators: Mapping[str, BaseEstimator] | None = None,
     pos_label: Any = None,
     positive_label: Any = None,
-) -> dict[str, Any]:
+) -> PipelineResult:
+
     """Execute a full train-evaluate pipeline in the correct order.
 
     Parameters
@@ -118,11 +132,12 @@ def run_pipeline(
             path = save_model(model, f"{name}.joblib", base_path=save_dir)
             logger.info("Saved %s → %s", name, path)
 
-    return {
-        "models": models,
-        "comparison": comparison,
-        "x_train": x_train,
-        "x_test": x_test,
-        "y_train": y_train,
-        "y_test": y_test,
-    }
+    return PipelineResult(
+        models=models,
+        comparison=comparison,
+        x_train=x_train,
+        x_test=x_test,
+        y_train=y_train,
+        y_test=y_test,
+    )
+

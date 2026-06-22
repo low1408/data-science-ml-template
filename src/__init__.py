@@ -3,24 +3,29 @@ from src.data import (
     CSVDataLoader,
     ParquetDataLoader,
     SQLiteDataLoader,
+    SQLiteQueryLoader,
+    SQLiteTableLoader,
     split_features_target,
     train_test_split_dataframe,
+)
+from src.artifacts import (
+    load_model,
+    save_model,
 )
 from src.evaluation import (
     TaskType,
     classification_metrics,
+    compare_models,
     evaluate_model,
     model_comparison_table,
     regression_metrics,
 )
 from src.modeling import (
     baseline_estimators,
-    compare_models,
-    load_model,
-    save_model,
     train_baseline_models,
 )
 from src.preprocessing import (
+    BooleanMappingTransformer,
     FeatureColumns,
     PreprocessingConfig,
     build_model_pipeline,
@@ -28,15 +33,19 @@ from src.preprocessing import (
 )
 from src.pipeline import run_pipeline
 from src.validation import (
+    ConfigurationError,
     DataSchema,
     DataValidationError,
+    ValidationIssue,
     ValidationResult,
     dataset_summary,
     validate_dataframe,
 )
 
 __all__ = [
+    "BooleanMappingTransformer",
     "CSVDataLoader",
+    "ConfigurationError",
     "DATA_DIR",
     "MODELS_DIR",
     "PreprocessingConfig",
@@ -48,7 +57,10 @@ __all__ = [
     "ParquetDataLoader",
     "run_pipeline",
     "SQLiteDataLoader",
+    "SQLiteQueryLoader",
+    "SQLiteTableLoader",
     "TaskType",
+    "ValidationIssue",
     "ValidationResult",
     "baseline_estimators",
     "build_model_pipeline",

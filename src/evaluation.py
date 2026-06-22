@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -75,11 +76,8 @@ def classification_metrics(
                 else:
                     metrics["roc_auc"] = roc_auc_score(y_true, y_score)
         except ValueError as exc:
-            warnings.warn(
-                f"ROC-AUC could not be computed and was omitted: {exc}",
-                stacklevel=2,
-            )
             logger.warning("ROC-AUC skipped: %s", exc)
+            metrics["roc_auc"] = float("nan")
 
     return {name: float(value) for name, value in metrics.items()}
 
@@ -96,7 +94,7 @@ def regression_metrics(
 
 
 def evaluate_model(
-    model: object,
+    model: BaseEstimator,
     x_test: pd.DataFrame,
     y_test: pd.Series,
     *,
@@ -108,7 +106,7 @@ def evaluate_model(
 
     Parameters
     ----------
-    model : object
+    model : BaseEstimator
         Fitted estimator/pipeline.
     x_test : pd.DataFrame
         Test features.
@@ -153,14 +151,14 @@ def model_comparison_table(results: dict[str, dict[str, float]]) -> pd.DataFrame
     return pd.DataFrame.from_dict(results, orient="index").rename_axis("model")
 
 
-def _predict_scores(model: object, x_test: pd.DataFrame, pos_label: Any = None) -> np.ndarray | None:
+def _predict_scores(model: BaseEstimator, x_test: pd.DataFrame, pos_label: Any = None) -> np.ndarray | None:
     """Predict scores/probabilities for the positive class in classification.
 
     For binary classification, defaults to model.classes_[1] if pos_label is None.
 
     Parameters
     ----------
-    model : object
+    model : BaseEstimator
         Fitted estimator/pipeline.
     x_test : pd.DataFrame
         Test features.
@@ -180,16 +178,16 @@ def _predict_scores(model: object, x_test: pd.DataFrame, pos_label: Any = None) 
                 if pos_label is not None:
                     if pos_label in classes:
                         idx = classes.index(pos_label)
-                        return probabilities[:, idx]
+                        return probabilities[:, idx]  # type: ignore[no-any-return]
                     else:
                         raise ValueError(
                             f"pos_label {pos_label!r} not found in model.classes_ {classes!r}"
                         )
                 else:
-                    return probabilities[:, 1]
-            return probabilities[:, 1]
+                    return probabilities[:, 1]  # type: ignore[no-any-return]
+            return probabilities[:, 1]  # type: ignore[no-any-return]
         # Multi-class: return full probability matrix for OvR AUC
-        return probabilities
+        return probabilities  # type: ignore[no-any-return]
 
     if hasattr(model, "decision_function"):
         scores = model.decision_function(x_test)
@@ -199,12 +197,55 @@ def _predict_scores(model: object, x_test: pd.DataFrame, pos_label: Any = None) 
                 idx = classes.index(pos_label)
                 # Negate decision function scores if pos_label is the negative class (index 0)
                 if idx == 0:
-                    return -scores
-                return scores
+                    return -scores  # type: ignore[no-any-return]
+                return scores  # type: ignore[no-any-return]
             else:
                 raise ValueError(
                     f"pos_label {pos_label!r} not found in model.classes_ {classes!r}"
                 )
-        return scores
+        return scores  # type: ignore[no-any-return]
 
     return None
+
+
+def compare_models(
+    models: dict[str, BaseEstimator],
+    x_test: pd.DataFrame,
+    y_test: pd.Series,
+    *,
+    task: TaskType,
+    pos_label: Any = None,
+    positive_label: Any = None,
+) -> pd.DataFrame:
+    """Compare multiple models on test dataset.
+
+    Parameters
+    ----------
+    models : dict[str, BaseEstimator]
+        Dictionary of fitted estimators/pipelines.
+    x_test : pd.DataFrame
+        Test features.
+    y_test : pd.Series
+        Test target labels.
+    task : TaskType
+        Either "classification" or "regression".
+    pos_label : Any, default=None
+        The class label to treat as the positive class for binary classification.
+    positive_label : Any, default=None
+        Alias for pos_label. If specified, pos_label must be None.
+
+    Returns
+    -------
+    pd.DataFrame
+        Table comparing metrics for all models.
+    """
+    if positive_label is not None:
+        if pos_label is not None:
+            raise ValueError("Cannot specify both pos_label and positive_label.")
+        pos_label = positive_label
+
+    results = {
+        name: evaluate_model(model, x_test, y_test, task=task, pos_label=pos_label)
+        for name, model in models.items()
+    }
+    return model_comparison_table(results)

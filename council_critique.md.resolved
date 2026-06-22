@@ -1,0 +1,252 @@
+# Quorum Council Critique — `data-science-ml-template`
+
+**Scope:** `src/` (config, data, preprocessing, modeling, evaluation, validation, pipeline)
+**Council status:** PARTIAL_SUCCESS — 2 of 3 members returned (Qwen timed out)
+
+---
+
+## Summary Table
+
+| # | Finding | Module | Classification | Severity |
+|---|---------|--------|----------------|----------|
+| 1 | Frozen dataclasses contain mutable collections | preprocessing, validation | Confirmed defect | Medium |
+| 2 | `TabularDataLoader` contract broken by `SQLiteDataLoader` | data | Confirmed defect | Medium |
+| 3 | `data.py` mixes I/O, path resolution, and splitting | data | Architectural risk | Low |
+| 4 | `modeling.py` mixes 4 unrelated concerns | modeling | Architectural risk | Medium |
+| 5 | `baseline_estimators` is closed to extension | modeling | Architectural risk | Medium |
+| 6 | Estimators not cloned before training | modeling | Likely defect | Medium |
+| 7 | Incomplete type annotations across public API | all | Confirmed defect | Medium |
+| 8 | `TaskType` Literal duplicated, not runtime-enforced | evaluation, modeling | Architectural risk | Low |
+| 9 | `run_pipeline` returns `dict[str, Any]` | pipeline | Hardening rec. | Medium |
+| 10 | Saved model paths computed but discarded | pipeline, modeling | Confirmed defect | Low |
+| 11 | `resolve_path` doesn't enforce base directory | data, modeling | Architectural risk | Medium |
+| 12 | SQLite raw-WHERE injection risk persists even with `params` | data | Architectural risk | **High** |
+| 13 | `DataSchema` parameters not self-validated | validation | Confirmed defect | Medium |
+| 14 | Missing column reported multiple times | validation | Confirmed defect | Low |
+| 15 | Validation errors are plain strings, not structured | validation | Architectural risk | Medium |
+| 16 | Boolean pipeline assumes int-castable post-imputation values | preprocessing | Likely defect | Medium |
+| 17 | Imputer strategy and `remainder` accept arbitrary strings | preprocessing | Confirmed defect | Low |
+| 18 | `build_preprocessor` takes a full DataFrame to inspect columns | preprocessing | Architectural risk | Low |
+| 19 | ROC-AUC failure silently changes output schema | evaluation | Likely defect | Medium |
+| 20 | Binary ROC-AUC positive-class convention not explicit | evaluation | Likely defect | **High** |
+| 21 | No cross-validation: schema ↔ target ↔ feature roles | pipeline | Likely defect | Medium |
+| 22 | `stratify: bool` is not extensible to group/temporal splits | data, pipeline | Architectural risk | Low |
+| 23 | Model persistence lacks version metadata & trust boundary | modeling | Hardening rec. | Medium |
+| 24 | `pipeline.py` has unused imports | pipeline | Confirmed defect | Low |
+| 25 | Error handling inconsistent across modules | all | Architectural risk | Medium |
+| 26 | No `test_pipeline.py` or persistence tests visible | tests | Unverifiable | Medium |
+| 27 | `__init__.py` public API not audited by council | __init__ | Unverifiable | Medium |
+
+---
+
+## Detailed Findings
+
+### 🔴 High Severity
+
+#### F-12 · SQLite raw-WHERE injection risk persists even with `params` — `src/data.py`
+**Classification:** Architectural risk — High
+
+`load_table` interpolates a raw `where` string into the query and only warns when `params` is `None`. Supplying `params` does **not** make the WHERE fragment structurally safe — a UNION injection can still occur via the `where` argument itself. `load_query` is entirely unrestricted. The warning-based approach is weak because warnings are commonly filtered and execution proceeds.
+
+**Options:**
+- Separate raw-query execution into an explicitly named escape hatch (`load_raw_query`).
+- For the structured loader, expose a `predicates: dict[str, Any]` argument and build the WHERE internally.
+- At minimum, document that `params` protects *values only*, not SQL structure.
+
+---
+
+#### F-20 · Binary ROC-AUC positive-class convention not explicit — `src/evaluation.py`
+**Classification:** Likely defect — High
+
+`_predict_scores` always returns `probabilities[:, 1]`, which corresponds to `model.classes_[1]`. For non-standard label orderings (e.g. `["approved", "rejected"]`) this silently computes the wrong AUC without any error.
+
+**Options:**
+- Inspect `model.classes_` and document the positive-class assumption.
+- Accept an optional `positive_label` parameter in `evaluate_model`.
+
+---
+
+### 🟡 Medium Severity
+
+#### F-1 · Frozen dataclasses contain mutable collections — `src/preprocessing.py`, `src/validation.py`
+**Classification:** Confirmed defect — Medium
+
+`FeatureColumns` and `DataSchema` are `frozen=True` but hold `list` and `dict` fields. `object.__setattr__` protects against rebinding, not mutation — `config.feature_columns.numeric.append("x")` is valid and silently corrupts the config.
+
+**Fix:** Convert lists to `tuple` and dicts to `types.MappingProxyType` in `__post_init__`.
+
+---
+
+#### F-2 · `TabularDataLoader` Protocol contract broken by `SQLiteDataLoader` — `src/data.py`
+**Classification:** Confirmed defect — Medium
+
+The Protocol declares `load(self) -> DataFrame` with no arguments. `SQLiteDataLoader.load()` can raise when the DB has >1 table. A polymorphic consumer calling `loader.load()` will experience silent breakage.
+
+**Fix:** Require table name in `SQLiteDataLoader.__init__`, or split into `SQLiteTableLoader` / `SQLiteQueryLoader`.
+
+---
+
+#### F-4 · `modeling.py` mixes 4 unrelated concerns
+**Classification:** Architectural risk — Medium
+
+`modeling.py` owns: estimator selection, pipeline fitting, evaluation orchestration (`compare_models`), and model persistence (`save_model`/`load_model`). These change for different reasons.
+
+**Fix:** Move `compare_models` → `evaluation.py`; move `save_model`/`load_model` → a new `artifacts.py`.
+
+---
+
+#### F-5 · `baseline_estimators` is closed to extension — `src/modeling.py`
+**Classification:** Architectural risk — Medium
+
+Hard-coded `if/elif` chain. Adding a new task type or a new default estimator requires editing this function. This is not a registry — it's an if-chain factory.
+
+**Fix:** Replace with a `dict[TaskType, Callable[[], dict[str, BaseEstimator]]]` that callers can extend without touching this module.
+
+---
+
+#### F-6 · Estimators not cloned before training — `src/modeling.py`
+**Classification:** Likely defect — Medium
+
+`train_baseline_models` puts caller-provided estimators directly into pipelines and fits them in-place. Reusing the same mapping across two training calls mutates state; duplicate dictionary values under two keys alias the same object.
+
+**Fix:** Call `sklearn.base.clone(estimator)` inside the training loop.
+
+---
+
+#### F-7 · Incomplete type annotations across public API
+**Classification:** Confirmed defect — Medium
+
+Functions missing full annotations include: `resolve_path`, `split_features_target`, `train_test_split_dataframe`, `train_baseline_models`, `compare_models`, `classification_metrics`, `regression_metrics`, `validate_dataframe`, `build_model_pipeline`. `save_model`/`load_model` return `Any`.
+
+**Fix:** Add complete annotations; run `mypy --strict src/`.
+
+---
+
+#### F-9 · `run_pipeline` returns `dict[str, Any]` — `src/pipeline.py`
+**Classification:** Hardening recommendation — Medium
+
+The six return keys (`models`, `comparison`, `x_train`, `x_test`, `y_train`, `y_test`) are untyped and undiscoverable. Misspelled keys are silent at runtime.
+
+**Fix:** Return a `@dataclass(frozen=True) PipelineResult` with typed fields.
+
+---
+
+#### F-11 · `resolve_path` doesn't enforce base directory — `src/data.py`
+**Classification:** Architectural risk — Medium
+
+`save_model("../outside.joblib")` resolves outside `MODELS_DIR` without any containment check.
+
+**Fix:** Add an optional `confine_to_base: bool` parameter; for persistence calls, default to `True`.
+
+---
+
+#### F-13 · `DataSchema` parameters not self-validated — `src/validation.py`
+**Classification:** Confirmed defect — Medium
+
+`null_limits` can be `< 0` or `> 1`. `ranges` can have `lo > hi`. These are configuration errors that silently surface as data errors.
+
+**Fix:** Add `__post_init__` checks with a dedicated `ConfigurationError`.
+
+---
+
+#### F-15 · Validation errors are plain strings — `src/validation.py`
+**Classification:** Architectural risk — Medium
+
+`ValidationResult.errors: list[str]` and `DataValidationError` with a newline-joined message. Callers cannot filter by column or rule without string parsing.
+
+**Fix:** Define `ValidationIssue(code, column, expected, actual)` and store `list[ValidationIssue]`.
+
+---
+
+#### F-16 · Boolean pipeline assumes int-castable post-imputation values — `src/preprocessing.py`
+**Classification:** Likely defect — Medium
+
+`object → impute → astype(int)` fails silently or with a cryptic cast error for `"true"/"false"`, `"yes"/"no"` input values.
+
+**Fix:** Add a domain-validation step or an explicit mapping transformer with configurable encodings.
+
+---
+
+#### F-19 · ROC-AUC failure silently changes output schema — `src/evaluation.py`
+**Classification:** Likely defect — Medium
+
+On `ValueError`, `roc_auc` is omitted from the dict entirely. The comparison table column set depends on observed runtime behavior. Both a `warnings.warn` and a `logger.warning` are emitted for the same event.
+
+**Fix:** Return `float("nan")` on failure; choose one of warning or logging, not both.
+
+---
+
+#### F-21 · No cross-validation between schema, target, and feature roles — `src/pipeline.py`
+**Classification:** Likely defect — Medium
+
+No check that: the target is not in `FeatureColumns`; the target is in `DataSchema.required_columns`; all configured features are in the schema. A target included in `FeatureColumns` produces a misleading "feature missing" error after splitting.
+
+**Fix:** Add an upfront configuration-consistency check before splitting.
+
+---
+
+#### F-23 · Persistence lacks version metadata and trust boundary — `src/modeling.py`
+**Classification:** Hardening recommendation — Medium
+
+`joblib.dump/load` with no companion metadata. Artifacts silently break across sklearn/Python version bumps. `joblib.load` on an untrusted file executes arbitrary code.
+
+**Fix:** Write a companion `.json` sidecar with library versions, config digest, and timestamp. Check it on load.
+
+---
+
+#### F-25 · Error handling inconsistent across modules
+**Classification:** Architectural risk — Medium
+
+The library raises `KeyError`, `ValueError`, `FileNotFoundError`, emits `warnings.warn`, and has one custom `DataValidationError`. Callers cannot catch a coherent exception family.
+
+**Fix:** Define a small hierarchy: `MLTemplateError → ConfigurationError | DataLoadingError | DataValidationError | EvaluationError`. Preserve cause with `raise X from exc`.
+
+---
+
+### 🟢 Low Severity
+
+#### F-3 · `data.py` mixes I/O, path resolution, and splitting
+Separate into `loaders.py` (or `loaders/`), `paths.py`, and `splitting.py`.
+
+#### F-8 · `TaskType` Literal duplicated and not runtime-enforced
+Use a `str`-backed `Enum` or a single central validation function to avoid divergent error messages.
+
+#### F-10 · Saved model paths discarded in `run_pipeline`
+The `path` variable assigned in the save loop is never returned. Add `saved_paths: dict[str, Path]` to `PipelineResult`.
+
+#### F-14 · Missing column reported multiple times in validation
+Track missing columns once; skip downstream rule checks for them.
+
+#### F-17 · Imputer strategy and `remainder` accept arbitrary strings
+Use `Literal["mean", "median", "most_frequent", "constant"]` for strategies.
+
+#### F-18 · `build_preprocessor` takes a full DataFrame just to check column names
+Accept `Sequence[str]` (column names) instead of the full DataFrame, or make column validation caller's responsibility.
+
+#### F-22 · `stratify: bool` not extensible to group/temporal splits
+Accept an optional `splitter` object conforming to sklearn's CV splitter interface.
+
+#### F-24 · `pipeline.py` has unused imports
+`split_features_target`, `baseline_estimators`, `FeatureColumns`, `build_model_pipeline` are imported but never referenced. Run Ruff/Pyflakes.
+
+---
+
+## Not Verifiable by Council
+
+- **F-26:** No `test_pipeline.py` visible — coverage of `run_pipeline`, persistence, and cross-module invariants is unconfirmed.
+- **F-27:** `src/__init__.py` public API not shown to council — re-export completeness and naming consistency unverified.
+
+---
+
+## Recommended Priority Order
+
+1. **F-6** — Clone estimators (`sklearn.base.clone`) — one-liner, prevents silent bugs
+2. **F-24** — Remove unused imports — zero-risk cleanup
+3. **F-1** — Harden immutability with `tuple`/`MappingProxyType`
+4. **F-10** — Return `saved_paths` from pipeline
+5. **F-19** — Return `NaN` instead of omitting `roc_auc`
+6. **F-9** — Introduce `PipelineResult` dataclass
+7. **F-13** — Add `DataSchema.__post_init__` self-validation
+8. **F-14** — Deduplicate missing-column errors in validation
+9. **F-7** — Complete type annotations + `mypy --strict`
+10. **F-25** — Define exception hierarchy

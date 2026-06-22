@@ -21,13 +21,30 @@ class TabularDataLoader(Protocol):
         ...
 
 
-def resolve_path(path: str | Path, base_path: str | Path = PROJECT_ROOT) -> Path:
-    path = Path(path).expanduser()
+def resolve_path(
+    path: str | Path,
+    base_path: str | Path = PROJECT_ROOT,
+    *,
+    confine_to_base: bool = False,
+) -> Path:
+    resolved_base = Path(base_path).expanduser().resolve()
+    path_obj = Path(path).expanduser()
 
-    if not path.is_absolute():
-        path = Path(base_path).expanduser() / path
+    if not path_obj.is_absolute():
+        path_obj = resolved_base / path_obj
 
-    return path.resolve()
+    resolved_path = path_obj.resolve()
+
+    if confine_to_base:
+        try:
+            resolved_path.relative_to(resolved_base)
+        except ValueError:
+            raise ValueError(
+                f"Path '{resolved_path}' escapes the base directory '{resolved_base}'."
+            )
+
+    return resolved_path
+
 
 
 # ── Data-splitting utilities (moved from preprocessing.py — F-08) ────
@@ -54,7 +71,7 @@ def train_test_split_dataframe(
     features, target = split_features_target(dataframe, target_column)
     stratify_values = target if stratify else None
 
-    return train_test_split(
+    return train_test_split(  # type: ignore[no-any-return]
         features,
         target,
         test_size=test_size,
@@ -187,7 +204,7 @@ class SQLiteDataLoader:
             query_params = params
         elif predicates:
             where_clauses = []
-            where_params = []
+            where_params: list[Any] = []
             for col, val in predicates.items():
                 quoted_col = self._quote_identifier(col)
                 if val is None:
@@ -256,9 +273,62 @@ class SQLiteDataLoader:
         with sqlite3.connect(self.db_path) as connection:
             result = pd.read_sql_query(query, connection)
 
-        return result["name"].tolist()
+        return result["name"].tolist()  # type: ignore[no-any-return]
 
     @staticmethod
     def _quote_identifier(identifier: str) -> str:
         escaped_identifier = identifier.replace('"', '""')
         return f'"{escaped_identifier}"'
+
+
+class SQLiteTableLoader:
+    """Loads data from a specific SQLite table, conforming to the TabularDataLoader interface."""
+
+    def __init__(
+        self,
+        db_path: str | Path,
+        table_name: str,
+        base_path: str | Path = PROJECT_ROOT,
+        columns: list[str] | None = None,
+        predicates: dict[str, Any] | None = None,
+        limit: int | None = None,
+    ) -> None:
+        self.db_path = resolve_path(db_path, base_path)
+        self.table_name = table_name
+        self.columns = columns
+        self.predicates = predicates
+        self.limit = limit
+
+        if not self.db_path.exists():
+            raise FileNotFoundError(f"Database not found: {self.db_path}")
+
+    def load(self) -> pd.DataFrame:
+        loader = SQLiteDataLoader(self.db_path)
+        return loader.load_table(
+            self.table_name,
+            columns=self.columns,
+            predicates=self.predicates,
+            limit=self.limit,
+        )
+
+
+class SQLiteQueryLoader:
+    """Loads data using a raw SQL query from a SQLite database, conforming to the TabularDataLoader interface."""
+
+    def __init__(
+        self,
+        db_path: str | Path,
+        query: str,
+        params: tuple[Any, ...] | dict[str, Any] | None = None,
+        base_path: str | Path = PROJECT_ROOT,
+    ) -> None:
+        self.db_path = resolve_path(db_path, base_path)
+        self.query = query
+        self.params = params
+
+        if not self.db_path.exists():
+            raise FileNotFoundError(f"Database not found: {self.db_path}")
+
+    def load(self) -> pd.DataFrame:
+        loader = SQLiteDataLoader(self.db_path)
+        return loader.load_raw_query(self.query, params=self.params)

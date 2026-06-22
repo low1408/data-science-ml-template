@@ -12,12 +12,85 @@ from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardSc
 
 @dataclass(frozen=True)
 class FeatureColumns:
-    numeric: list[str]
-    categorical: list[str]
-    boolean: list[str] | None = None
+    numeric: list[str] | tuple[str, ...]
+    categorical: list[str] | tuple[str, ...]
+    boolean: list[str] | tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "boolean", self.boolean or [])
+        object.__setattr__(self, "numeric", tuple(self.numeric))
+        object.__setattr__(self, "categorical", tuple(self.categorical))
+        object.__setattr__(self, "boolean", tuple(self.boolean or ()))
+
+
+from typing import Any
+from sklearn.base import BaseEstimator, TransformerMixin
+
+
+DEFAULT_BOOLEAN_MAPPING = {
+    True: 1,
+    False: 0,
+    1: 1,
+    0: 0,
+    1.0: 1,
+    0.0: 0,
+    "true": 1,
+    "false": 0,
+    "True": 1,
+    "False": 0,
+    "TRUE": 1,
+    "FALSE": 0,
+    "yes": 1,
+    "no": 0,
+    "Yes": 1,
+    "No": 0,
+    "YES": 1,
+    "NO": 0,
+    "y": 1,
+    "n": 0,
+    "Y": 1,
+    "N": 0,
+    "1": 1,
+    "0": 0,
+}
+
+
+class BooleanMappingTransformer(BaseEstimator, TransformerMixin):
+    def __init__(self, mapping: dict[Any, int] | None = None) -> None:
+        self.mapping = mapping
+
+    def fit(self, X: pd.DataFrame, y: Any = None) -> BooleanMappingTransformer:
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        X_df = pd.DataFrame(X).copy()
+
+        current_mapping = dict(DEFAULT_BOOLEAN_MAPPING)
+        if self.mapping is not None:
+            current_mapping.update(self.mapping)
+
+        def map_value(val: Any) -> Any:
+            if pd.isna(val):
+                return val
+
+            # Try exact match first
+            if val in current_mapping:
+                return current_mapping[val]
+
+            # If string, try normalized match
+            if isinstance(val, str):
+                normalized = val.strip().lower()
+                if normalized in current_mapping:
+                    return current_mapping[normalized]
+
+            raise ValueError(
+                f"Value {repr(val)} (type {type(val)}) could not be mapped to a boolean integer. "
+                f"Supported values (case-insensitive for strings) are: {list(current_mapping.keys())}"
+            )
+
+        if hasattr(X_df, "map"):
+            return X_df.map(map_value)
+        else:
+            return X_df.applymap(map_value)
 
 
 @dataclass(frozen=True)
@@ -28,6 +101,7 @@ class PreprocessingConfig:
     categorical_imputer_strategy: str = "most_frequent"
     boolean_imputer_strategy: str = "most_frequent"
     remainder: str = "drop"
+    boolean_mapping: dict[Any, int] | None = None
 
 
 def _cast_to_object(values: pd.DataFrame | pd.Series) -> pd.DataFrame | pd.Series:
@@ -59,13 +133,14 @@ def build_preprocessor(
     )
     boolean_pipeline = Pipeline(
         steps=[
+            ("encoder", BooleanMappingTransformer(mapping=config.boolean_mapping)),
             ("to_object", FunctionTransformer(_cast_to_object)),
             ("imputer", SimpleImputer(strategy=config.boolean_imputer_strategy)),
             ("to_int", FunctionTransformer(_cast_to_int)),
         ]
     )
 
-    transformers: list[tuple[str, Pipeline, list[str]]] = []
+    transformers: list[tuple[str, Pipeline, list[str] | tuple[str, ...]]] = []
     if config.feature_columns.numeric:
         transformers.append(("numeric", Pipeline(numeric_steps), config.feature_columns.numeric))
     if config.feature_columns.categorical:
@@ -98,7 +173,7 @@ def build_model_pipeline(
 
 
 def _validate_feature_columns(dataframe: pd.DataFrame, columns: FeatureColumns) -> None:
-    configured_columns = columns.numeric + columns.categorical + (columns.boolean or [])
+    configured_columns = list(columns.numeric) + list(columns.categorical) + list(columns.boolean or ())
     missing_columns = [column for column in configured_columns if column not in dataframe.columns]
     if missing_columns:
         raise KeyError(f"Configured feature columns are missing from dataframe: {missing_columns}")
