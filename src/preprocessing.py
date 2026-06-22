@@ -9,6 +9,8 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
 
+from src.features import FeaturePipeline, SklearnFeaturePipeline
+
 
 @dataclass(frozen=True)
 class FeatureColumns:
@@ -156,19 +158,24 @@ def build_model_pipeline(
     dataframe: pd.DataFrame,
     *,
     config: PreprocessingConfig,
+    feature_pipeline: FeaturePipeline | None = None,
 ) -> Pipeline:
-    return Pipeline(
-        steps=[
-            (
-                "preprocessor",
-                build_preprocessor(
-                    dataframe,
-                    config=config,
-                ),
+    steps: list[tuple[str, Any]] = []
+    if feature_pipeline is not None:
+        steps.append(("feature_engineering", SklearnFeaturePipeline(feature_pipeline)))
+        dataframe = feature_pipeline.transform(dataframe)
+
+    steps.extend([
+        (
+            "preprocessor",
+            build_preprocessor(
+                dataframe,
+                config=config,
             ),
-            ("model", estimator),
-        ]
-    )
+        ),
+        ("model", estimator),
+    ])
+    return Pipeline(steps=steps)
 
 
 

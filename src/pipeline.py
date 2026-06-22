@@ -24,6 +24,7 @@ from src.modeling import (
     baseline_estimators,
     train_baseline_models,
 )
+from src.features import FeaturePipeline
 from src.preprocessing import FeatureColumns, PreprocessingConfig, build_model_pipeline
 from src.validation import DataSchema, validate_dataframe
 
@@ -56,6 +57,7 @@ def run_pipeline(
     estimators: Mapping[str, BaseEstimator] | None = None,
     pos_label: Any = None,
     positive_label: Any = None,
+    feature_pipeline: FeaturePipeline | None = None,
 ) -> PipelineResult:
 
     """Execute a full train-evaluate pipeline in the correct order.
@@ -85,6 +87,8 @@ def run_pipeline(
         The class label to treat as the positive class for binary classification.
     positive_label : Any, default=None
         Alias for pos_label. If specified, pos_label must be None.
+    feature_pipeline : FeaturePipeline | None
+        Optional FeaturePipeline to be executed during model fitting and inference.
 
     Returns
     -------
@@ -119,6 +123,7 @@ def run_pipeline(
         task=task,
         config=config,
         estimators=estimators,
+        feature_pipeline=feature_pipeline,
     )
 
     # 4. Evaluate ─────────────────────────────────────────────────────

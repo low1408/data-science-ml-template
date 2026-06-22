@@ -10,6 +10,7 @@ from sklearn.linear_model import LinearRegression, LogisticRegression
 
 from src.config import RANDOM_STATE
 from src.evaluation import TaskType
+from src.features import FeaturePipeline
 from src.preprocessing import PreprocessingConfig, build_model_pipeline
 
 
@@ -43,6 +44,7 @@ def train_baseline_models(
     task: TaskType,
     config: PreprocessingConfig,
     estimators: Mapping[str, BaseEstimator] | None = None,
+    feature_pipeline: FeaturePipeline | None = None,
 ) -> dict[str, BaseEstimator]:
     models: dict[str, BaseEstimator] = {}
     estimators_to_train = estimators if estimators is not None else baseline_estimators(task)
@@ -54,6 +56,7 @@ def train_baseline_models(
             cloned_estimator,
             x_train,
             config=config,
+            feature_pipeline=feature_pipeline,
         )
         pipeline.fit(x_train, y_train)
         models[name] = pipeline

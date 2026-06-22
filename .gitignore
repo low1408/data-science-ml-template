@@ -36,3 +36,7 @@ data/
 pyproject.toml
 
 tests/
+
+.mypy_cache/
+
+.pytest_cache/
