@@ -4,6 +4,7 @@ from collections import Counter
 from dataclasses import dataclass
 
 import pandas as pd
+from pandas.api.types import is_bool_dtype, is_numeric_dtype
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
@@ -22,6 +23,52 @@ class FeatureColumns:
         object.__setattr__(self, "numeric", tuple(self.numeric))
         object.__setattr__(self, "categorical", tuple(self.categorical))
         object.__setattr__(self, "boolean", tuple(self.boolean or ()))
+
+
+def infer_feature_columns(
+    dataframe: pd.DataFrame,
+    *,
+    target_column: str | None = None,
+    categorical_max_unique: int | None = None,
+) -> FeatureColumns:
+    """Infer initial tabular column roles from pandas dtypes.
+
+    This is intended as a starting point for a portable template. Review the
+    output before using it for a serious experiment.
+    """
+    numeric: list[str] = []
+    categorical: list[str] = []
+    boolean: list[str] = []
+
+    for column in dataframe.columns:
+        if column == target_column:
+            continue
+        series = dataframe[column]
+        if is_bool_dtype(series):
+            boolean.append(column)
+        elif is_numeric_dtype(series):
+            if _looks_boolean(series):
+                boolean.append(column)
+            elif (
+                categorical_max_unique is not None
+                and series.nunique(dropna=True) <= categorical_max_unique
+            ):
+                categorical.append(column)
+            else:
+                numeric.append(column)
+        else:
+            categorical.append(column)
+
+    return FeatureColumns(
+        numeric=numeric,
+        categorical=categorical,
+        boolean=boolean,
+    )
+
+
+def _looks_boolean(series: pd.Series) -> bool:
+    non_null_values = set(series.dropna().unique().tolist())
+    return bool(non_null_values) and non_null_values <= {0, 1, 0.0, 1.0}
 
 
 from typing import Any
@@ -193,6 +240,5 @@ def _validate_feature_columns(dataframe: pd.DataFrame, columns: FeatureColumns) 
             "Feature columns can only belong to one role. "
             f"Duplicates: {duplicate_columns}"
         )
-
 
 

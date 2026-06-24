@@ -30,6 +30,7 @@ from src.preprocessing import (
     PreprocessingConfig,
     build_model_pipeline,
     build_preprocessor,
+    infer_feature_columns,
 )
 from src.pipeline import run_pipeline
 from src.project_config import (
@@ -90,6 +91,7 @@ __all__ = [
     "compare_models",
     "dataset_summary",
     "evaluate_model",
+    "infer_feature_columns",
     "load_dataframe_from_config",
     "load_model",
     "load_project_config",
