@@ -5,7 +5,14 @@ from typing import Callable, Mapping
 import pandas as pd
 from sklearn.base import BaseEstimator, clone
 from sklearn.dummy import DummyClassifier, DummyRegressor
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.ensemble import (
+    HistGradientBoostingClassifier,
+    HistGradientBoostingRegressor,
+    RandomForestClassifier,
+    RandomForestRegressor,
+)
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import FunctionTransformer
 from sklearn.linear_model import LinearRegression, LogisticRegression
 
 from src.config import RANDOM_STATE
@@ -14,17 +21,109 @@ from src.features import FeaturePipeline
 from src.preprocessing import PreprocessingConfig, build_model_pipeline
 
 
+def _densify_if_sparse(values: object) -> object:
+    if hasattr(values, "toarray"):
+        return values.toarray()
+    return values
+
+
+def _hist_gradient_boosting_classifier() -> Pipeline:
+    return Pipeline(
+        steps=[
+            ("to_dense", FunctionTransformer(_densify_if_sparse, accept_sparse=True)),
+            (
+                "estimator",
+                HistGradientBoostingClassifier(random_state=RANDOM_STATE),
+            ),
+        ]
+    )
+
+
+def _hist_gradient_boosting_regressor() -> Pipeline:
+    return Pipeline(
+        steps=[
+            ("to_dense", FunctionTransformer(_densify_if_sparse, accept_sparse=True)),
+            (
+                "estimator",
+                HistGradientBoostingRegressor(random_state=RANDOM_STATE),
+            ),
+        ]
+    )
+
+
+def _optional_classification_estimators() -> dict[str, BaseEstimator]:
+    estimators: dict[str, BaseEstimator] = {}
+    try:
+        from lightgbm import LGBMClassifier
+    except ImportError:
+        pass
+    else:
+        estimators["lightgbm"] = LGBMClassifier(random_state=RANDOM_STATE)
+
+    try:
+        from xgboost import XGBClassifier
+    except ImportError:
+        pass
+    else:
+        estimators["xgboost"] = XGBClassifier(random_state=RANDOM_STATE)
+
+    try:
+        from catboost import CatBoostClassifier
+    except ImportError:
+        pass
+    else:
+        estimators["catboost"] = CatBoostClassifier(
+            random_seed=RANDOM_STATE,
+            verbose=False,
+        )
+
+    return estimators
+
+
+def _optional_regression_estimators() -> dict[str, BaseEstimator]:
+    estimators: dict[str, BaseEstimator] = {}
+    try:
+        from lightgbm import LGBMRegressor
+    except ImportError:
+        pass
+    else:
+        estimators["lightgbm"] = LGBMRegressor(random_state=RANDOM_STATE)
+
+    try:
+        from xgboost import XGBRegressor
+    except ImportError:
+        pass
+    else:
+        estimators["xgboost"] = XGBRegressor(random_state=RANDOM_STATE)
+
+    try:
+        from catboost import CatBoostRegressor
+    except ImportError:
+        pass
+    else:
+        estimators["catboost"] = CatBoostRegressor(
+            random_seed=RANDOM_STATE,
+            verbose=False,
+        )
+
+    return estimators
+
+
 # Extensible registry for task baseline estimators (F-5)
 ESTIMATOR_REGISTRY: dict[TaskType, Callable[[], dict[str, BaseEstimator]]] = {
     "classification": lambda: {
         "dummy": DummyClassifier(strategy="most_frequent"),
         "logistic_regression": LogisticRegression(max_iter=1000),
         "random_forest": RandomForestClassifier(random_state=RANDOM_STATE),
+        "hist_gradient_boosting": _hist_gradient_boosting_classifier(),
+        **_optional_classification_estimators(),
     },
     "regression": lambda: {
         "dummy": DummyRegressor(strategy="mean"),
         "linear_regression": LinearRegression(),
         "random_forest": RandomForestRegressor(random_state=RANDOM_STATE),
+        "hist_gradient_boosting": _hist_gradient_boosting_regressor(),
+        **_optional_regression_estimators(),
     },
 }
 
@@ -62,4 +161,3 @@ def train_baseline_models(
         models[name] = pipeline
 
     return models
-

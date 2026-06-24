@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+import warnings
 
 import pandas as pd
 from pandas.api.types import is_dtype_equal
@@ -127,6 +128,8 @@ def validate_dataframe(
     raise_on_error: bool = True,
 ) -> ValidationResult:
     errors: list[ValidationIssue] = []
+    _warn_on_duplicate_rows(dataframe)
+    _warn_on_constant_columns(dataframe)
 
     missing_columns = [
         column for column in schema.required_columns if column not in dataframe.columns
@@ -327,6 +330,34 @@ def validate_dataframe(
         raise DataValidationError(errors)
 
     return result
+
+
+def _warn_on_duplicate_rows(dataframe: pd.DataFrame) -> None:
+    duplicate_count = int(dataframe.duplicated().sum())
+    if duplicate_count:
+        warnings.warn(
+            f"Dataframe contains {duplicate_count} duplicate row(s).",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
+def _warn_on_constant_columns(dataframe: pd.DataFrame) -> None:
+    if dataframe.empty:
+        return
+
+    constant_columns = [
+        column
+        for column in dataframe.columns
+        if dataframe[column].nunique(dropna=False) <= 1
+    ]
+    if constant_columns:
+        warnings.warn(
+            "Dataframe contains constant-value column(s): "
+            f"{constant_columns}.",
+            UserWarning,
+            stacklevel=3,
+        )
 
 
 def dataset_summary(dataframe: pd.DataFrame) -> dict[str, Any]:

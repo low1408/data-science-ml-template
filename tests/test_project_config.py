@@ -22,8 +22,10 @@ def test_project_config_from_dict_builds_runtime_objects():
                 "numeric": ["age"],
                 "categorical": ["region"],
                 "boolean": ["active"],
+                "datetime": ["created_at"],
+                "text": ["comment"],
             },
-            "preprocessing": {"scale_numeric": True},
+            "preprocessing": {"scale_numeric": True, "text_max_features": 25},
             "schema": {
                 "required_columns": ["age", "region", "active", "target"],
                 "null_limits": {"age": 0.5},
@@ -34,6 +36,9 @@ def test_project_config_from_dict_builds_runtime_objects():
     assert config.data.kind == "csv"
     assert config.pipeline.estimator_names == ("dummy",)
     assert config.preprocessing.scale_numeric is True
+    assert config.preprocessing.feature_columns.datetime == ("created_at",)
+    assert config.preprocessing.feature_columns.text == ("comment",)
+    assert config.preprocessing.text_max_features == 25
     assert config.schema is not None
     assert config.schema.required_columns == ("age", "region", "active", "target")
 
@@ -90,7 +95,7 @@ def test_project_config_loads_optional_transform_settings():
                 "numeric_power_transform": "yeo_johnson",
                 "numeric_binning": "quantile",
                 "numeric_bin_count": 5,
-                "categorical_encoding": "ordinal",
+                "categorical_encoding": "target",
                 "group_rare_categories": True,
                 "rare_category_min_frequency": 0.02,
                 "frequency_unknown_value": -1.0,
@@ -106,7 +111,7 @@ def test_project_config_loads_optional_transform_settings():
     assert config.preprocessing.numeric_power_transform == "yeo_johnson"
     assert config.preprocessing.numeric_binning == "quantile"
     assert config.preprocessing.numeric_bin_count == 5
-    assert config.preprocessing.categorical_encoding == "ordinal"
+    assert config.preprocessing.categorical_encoding == "target"
     assert config.preprocessing.group_rare_categories is True
     assert config.preprocessing.rare_category_min_frequency == 0.02
     assert config.preprocessing.frequency_unknown_value == -1.0
@@ -174,6 +179,7 @@ task = "classification"
 test_size = 0.33
 stratify = true
 random_state = 7
+cv_folds = 3
 save_dir = "runs/example"
 estimator_names = ["dummy"]
 
@@ -190,7 +196,13 @@ boolean = []
 
     assert "dummy" in result.models
     assert result.run_metadata["random_state"] == 7
+    assert result.run_metadata["cv_folds"] == 3
+    assert result.cv_results is not None
     assert result.artifact_paths["metrics"].exists()
+    assert result.artifact_paths["cv_metrics"].exists()
     assert result.artifact_paths["metadata"].exists()
     assert result.artifact_paths["config"].exists()
-    assert (tmp_path / "runs/example/models/dummy.joblib").exists()
+    model_path = result.artifact_paths["model:dummy"]
+    assert model_path.exists()
+    assert model_path.parent.parent.parent.name == "runs"
+    assert model_path.parent.parent.name.startswith("run_")

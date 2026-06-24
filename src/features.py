@@ -8,8 +8,14 @@ from typing import Any, Literal
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 
-FeatureRole = Literal["numeric", "categorical", "boolean"]
-VALID_FEATURE_ROLES: tuple[FeatureRole, ...] = ("numeric", "categorical", "boolean")
+FeatureRole = Literal["numeric", "categorical", "boolean", "datetime", "text"]
+VALID_FEATURE_ROLES: tuple[FeatureRole, ...] = (
+    "numeric",
+    "categorical",
+    "boolean",
+    "datetime",
+    "text",
+)
 
 
 def validate_columns(frame: pd.DataFrame, columns: Sequence[str], frame_name: str) -> None:

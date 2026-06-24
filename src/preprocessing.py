@@ -6,9 +6,10 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from pandas.api.types import is_bool_dtype, is_numeric_dtype
+from pandas.api.types import is_bool_dtype, is_datetime64_any_dtype, is_numeric_dtype
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.impute import MissingIndicator, SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import (
@@ -20,6 +21,7 @@ from sklearn.preprocessing import (
     QuantileTransformer,
     RobustScaler,
     StandardScaler,
+    TargetEncoder,
 )
 
 from src.features import FeaturePipeline, FeatureRole, SklearnFeaturePipeline
@@ -30,11 +32,15 @@ class FeatureColumns:
     numeric: list[str] | tuple[str, ...]
     categorical: list[str] | tuple[str, ...]
     boolean: list[str] | tuple[str, ...] | None = None
+    datetime: list[str] | tuple[str, ...] | None = None
+    text: list[str] | tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "numeric", tuple(self.numeric))
         object.__setattr__(self, "categorical", tuple(self.categorical))
         object.__setattr__(self, "boolean", tuple(self.boolean or ()))
+        object.__setattr__(self, "datetime", tuple(self.datetime or ()))
+        object.__setattr__(self, "text", tuple(self.text or ()))
 
 
 def infer_feature_columns(
@@ -51,6 +57,7 @@ def infer_feature_columns(
     numeric: list[str] = []
     categorical: list[str] = []
     boolean: list[str] = []
+    datetime: list[str] = []
 
     for column in dataframe.columns:
         if column == target_column:
@@ -58,6 +65,8 @@ def infer_feature_columns(
         series = dataframe[column]
         if is_bool_dtype(series):
             boolean.append(column)
+        elif is_datetime64_any_dtype(series):
+            datetime.append(column)
         elif is_numeric_dtype(series):
             if _looks_boolean(series):
                 boolean.append(column)
@@ -75,6 +84,7 @@ def infer_feature_columns(
         numeric=numeric,
         categorical=categorical,
         boolean=boolean,
+        datetime=datetime,
     )
 
 
@@ -333,6 +343,92 @@ class PositiveBoxCoxTransformer(BaseEstimator, TransformerMixin):
             )
 
 
+class DateTimeFeatureExtractor(BaseEstimator, TransformerMixin):
+    """Extract stable calendar parts from datetime-like columns."""
+
+    output_parts: tuple[str, ...] = ("year", "month", "day", "dayofweek")
+
+    def fit(
+        self,
+        X: pd.DataFrame | np.ndarray,
+        y: Any = None,
+    ) -> DateTimeFeatureExtractor:
+        X_df = _as_dataframe(X)
+        self.feature_names_in_ = np.asarray(X_df.columns, dtype=object)
+        return self
+
+    def transform(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
+        X_df = _as_dataframe(X, tuple(self.feature_names_in_))
+        output = pd.DataFrame(index=X_df.index)
+        for column in X_df.columns:
+            values = pd.to_datetime(X_df[column], errors="coerce")
+            output[f"{column}_year"] = values.dt.year
+            output[f"{column}_month"] = values.dt.month
+            output[f"{column}_day"] = values.dt.day
+            output[f"{column}_dayofweek"] = values.dt.dayofweek
+        return output.astype("float64").to_numpy()
+
+    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+        feature_names = (
+            input_features if input_features is not None else self.feature_names_in_
+        )
+        return np.asarray(
+            [
+                f"{column}_{part}"
+                for column in feature_names
+                for part in self.output_parts
+            ],
+            dtype=object,
+        )
+
+
+class MultiColumnTfidfVectorizer(BaseEstimator, TransformerMixin):
+    """Apply one TfidfVectorizer per text column and concatenate the results."""
+
+    def __init__(self, *, max_features: int = 1000) -> None:
+        self.max_features = max_features
+
+    def fit(
+        self,
+        X: pd.DataFrame | np.ndarray,
+        y: Any = None,
+    ) -> MultiColumnTfidfVectorizer:
+        X_df = _as_dataframe(X)
+        self.feature_names_in_ = np.asarray(X_df.columns, dtype=object)
+        self.vectorizers_: dict[str, TfidfVectorizer] = {}
+        for column in X_df.columns:
+            vectorizer = TfidfVectorizer(max_features=self.max_features)
+            vectorizer.fit(self._documents(X_df[column]))
+            self.vectorizers_[column] = vectorizer
+        return self
+
+    def transform(self, X: pd.DataFrame | np.ndarray) -> Any:
+        from scipy import sparse
+
+        X_df = _as_dataframe(X, tuple(self.feature_names_in_))
+        matrices = [
+            self.vectorizers_[column].transform(self._documents(X_df[column]))
+            for column in X_df.columns
+        ]
+        if not matrices:
+            return sparse.csr_matrix((len(X_df), 0))
+        return sparse.hstack(matrices, format="csr")
+
+    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+        columns = (
+            input_features if input_features is not None else self.feature_names_in_
+        )
+        names: list[str] = []
+        for column in columns:
+            terms = self.vectorizers_[column].get_feature_names_out()
+            names.extend(f"{column}__tfidf_{term}" for term in terms)
+        return np.asarray(names, dtype=object)
+
+    def _documents(self, series: pd.Series) -> pd.Series:
+        documents = series.fillna("").astype(str)
+        return documents.mask(documents.str.strip() == "", "__empty__")
+
+
 class StratifiedHybridImputer(BaseEstimator, TransformerMixin):
     """Impute missing values from cohort, fallback-group, then global statistics."""
 
@@ -494,6 +590,7 @@ class PreprocessingConfig:
     boolean_imputer_strategy: str = "most_frequent"
     remainder: str = "drop"
     boolean_mapping: dict[Any, int] | None = None
+    text_max_features: int = 1000
     stratified_categorical_columns: tuple[str, ...] | None = None
     stratified_numeric_columns: tuple[str, ...] | None = None
     stratified_categorical_group_cols: tuple[str, ...] = ("branch", "client_id")
@@ -556,10 +653,15 @@ class PreprocessingConfig:
             "categorical_encoding",
             self.categorical_encoding.lower(),
         )
-        if self.categorical_encoding not in {"onehot", "frequency", "ordinal"}:
+        if self.categorical_encoding not in {
+            "onehot",
+            "frequency",
+            "ordinal",
+            "target",
+        }:
             raise ValueError(
                 "categorical_encoding must be one of: "
-                "'onehot', 'frequency', 'ordinal'."
+                "'onehot', 'frequency', 'ordinal', 'target'."
             )
         if not 0.0 <= self.quantile_cap_lower < self.quantile_cap_upper <= 1.0:
             raise ValueError(
@@ -572,6 +674,8 @@ class PreprocessingConfig:
             )
         if self.quantile_transform_n_quantiles < 1:
             raise ValueError("quantile_transform_n_quantiles must be at least 1.")
+        if self.text_max_features < 1:
+            raise ValueError("text_max_features must be at least 1.")
         for field_name in (
             "stratified_categorical_columns",
             "stratified_numeric_columns",
@@ -677,7 +781,7 @@ def build_preprocessor(
                 FrequencyEncoder(unknown_value=config.frequency_unknown_value),
             )
         )
-    else:
+    elif config.categorical_encoding == "ordinal":
         categorical_steps.append(
             (
                 "ordinal",
@@ -688,6 +792,8 @@ def build_preprocessor(
                 ),
             )
         )
+    else:
+        categorical_steps.append(("target", TargetEncoder()))
 
     categorical_pipeline = Pipeline(steps=categorical_steps)
     boolean_steps: list[tuple[str, object]] = [
@@ -697,6 +803,17 @@ def build_preprocessor(
         ("to_int", FunctionTransformer(_cast_to_int)),
     ]
     boolean_pipeline = Pipeline(steps=boolean_steps)
+    datetime_pipeline = Pipeline(
+        steps=[
+            ("extractor", DateTimeFeatureExtractor()),
+            ("imputer", SimpleImputer(strategy="median")),
+        ]
+    )
+    text_pipeline = Pipeline(
+        steps=[
+            ("tfidf", MultiColumnTfidfVectorizer(max_features=config.text_max_features)),
+        ]
+    )
 
     transformers: list[tuple[str, Pipeline, list[str] | tuple[str, ...]]] = []
     if config.feature_columns.numeric:
@@ -711,6 +828,12 @@ def build_preprocessor(
         transformers.append(
             ("boolean", boolean_pipeline, config.feature_columns.boolean)
         )
+    if config.feature_columns.datetime:
+        transformers.append(
+            ("datetime", datetime_pipeline, config.feature_columns.datetime)
+        )
+    if config.feature_columns.text:
+        transformers.append(("text", text_pipeline, config.feature_columns.text))
     indicator_columns = _stratified_indicator_columns(config)
     if indicator_columns:
         transformers.append(
@@ -791,6 +914,7 @@ def _simple_indicator_columns(config: PreprocessingConfig) -> tuple[str, ...]:
                 *config.feature_columns.numeric,
                 *config.feature_columns.categorical,
                 *config.feature_columns.boolean,
+                *config.feature_columns.datetime,
             )
         )
     )
@@ -833,10 +957,14 @@ def with_feature_pipeline_columns(
     numeric = list(config.feature_columns.numeric)
     categorical = list(config.feature_columns.categorical)
     boolean = list(config.feature_columns.boolean)
+    datetime = list(config.feature_columns.datetime)
+    text = list(config.feature_columns.text)
     role_columns: dict[FeatureRole, list[str]] = {
         "numeric": numeric,
         "categorical": categorical,
         "boolean": boolean,
+        "datetime": datetime,
+        "text": text,
     }
 
     configured_roles: dict[str, FeatureRole] = {}
@@ -869,13 +997,19 @@ def with_feature_pipeline_columns(
             numeric=numeric,
             categorical=categorical,
             boolean=boolean,
+            datetime=datetime,
+            text=text,
         ),
     )
 
 
 def _validate_feature_columns(dataframe: pd.DataFrame, columns: FeatureColumns) -> None:
     configured_columns = (
-        list(columns.numeric) + list(columns.categorical) + list(columns.boolean or ())
+        list(columns.numeric)
+        + list(columns.categorical)
+        + list(columns.boolean or ())
+        + list(columns.datetime or ())
+        + list(columns.text or ())
     )
     missing_columns = [
         column for column in configured_columns if column not in dataframe.columns

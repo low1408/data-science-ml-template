@@ -69,7 +69,23 @@ def train_test_split_dataframe(
     stratify: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
     features, target = split_features_target(dataframe, target_column)
-    stratify_values = target if stratify else None
+    stratify_values = None
+    if stratify:
+        class_counts = target.value_counts(dropna=False)
+        singleton_classes = class_counts[class_counts < 2]
+        if not singleton_classes.empty:
+            singleton_labels = [
+                repr(label) for label in singleton_classes.index.tolist()
+            ]
+            warnings.warn(
+                "Stratified train/test split requested, but the target contains "
+                f"class(es) with fewer than 2 samples: {singleton_labels}. "
+                "Falling back to a non-stratified split.",
+                UserWarning,
+                stacklevel=2,
+            )
+        else:
+            stratify_values = target
 
     return train_test_split(  # type: ignore[no-any-return]
         features,

@@ -26,8 +26,10 @@ from src.modeling import (
 )
 from src.preprocessing import (
     BooleanMappingTransformer,
+    DateTimeFeatureExtractor,
     FeatureColumns,
     FrequencyEncoder,
+    MultiColumnTfidfVectorizer,
     PositiveBoxCoxTransformer,
     PreprocessingConfig,
     QuantileCapper,
@@ -72,6 +74,7 @@ __all__ = [
     "ConfigurationError",
     "DATA_DIR",
     "DataSourceConfig",
+    "DateTimeFeatureExtractor",
     "EDAOnlyFeature",
     "MODELS_DIR",
     "PipelineConfig",
@@ -87,6 +90,7 @@ __all__ = [
     "FeaturePipeline",
     "FeatureColumns",
     "FrequencyEncoder",
+    "MultiColumnTfidfVectorizer",
     "ParquetDataLoader",
     "PositiveBoxCoxTransformer",
     "QuantileCapper",

@@ -32,7 +32,7 @@ Copy `src/configs/online_shopping_example.toml` and edit these sections:
 
 - `[data]`: choose `csv`, `parquet`, `sqlite_table`, or `sqlite_query`.
 - `[pipeline]`: set `target_column`, `task`, split options, `save_dir`, and optional `estimator_names`.
-- `[columns]`: list numeric, categorical, and boolean feature columns.
+- `[columns]`: list numeric, categorical, boolean, datetime, and text feature columns.
 - `[preprocessing]`: tune imputation, scaling, and remainder behavior.
 - `[schema]`: add lightweight validation checks before splitting.
 
@@ -66,9 +66,12 @@ estimator_names = ["dummy", "logistic_regression", "random_forest"]
 numeric = ["age", "income"]
 categorical = ["region"]
 boolean = ["is_active"]
+datetime = ["signup_date"]
+text = ["support_notes"]
 
 [preprocessing]
 scale_numeric = true
+text_max_features = 1000
 ```
 
 Optional numeric and categorical transforms are disabled by default. Enable them
@@ -89,13 +92,21 @@ numeric_distribution_transform = "none"  # "none", "quantile_uniform", or "quant
 numeric_binning = "none"                 # "none", "uniform", "quantile", or "kmeans"
 numeric_bin_count = 10
 
-categorical_encoding = "frequency"       # "onehot", "frequency", or "ordinal"
+categorical_encoding = "frequency"       # "onehot", "frequency", "ordinal", or "target"
 group_rare_categories = true
 rare_category_min_frequency = 0.01
 frequency_unknown_value = 0.0
 
 add_simple_missing_indicators = true
+text_max_features = 1000
 ```
+
+Datetime columns are converted into year, month, day, and day-of-week numeric
+features. Text columns are vectorized with per-column TF-IDF using
+`text_max_features` as the maximum vocabulary size per source column.
+Use `categorical_encoding = "target"` for high-cardinality categoricals when
+the category values are known at prediction time and the validation split
+reflects the production setting.
 
 Use `numeric_power_transform = "box_cox"` only for strictly positive numeric
 features. The Box-Cox transformer raises a clear error for zero or negative

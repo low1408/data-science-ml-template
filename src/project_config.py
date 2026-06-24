@@ -35,6 +35,7 @@ class PipelineConfig:
     test_size: float = 0.2
     stratify: bool = False
     random_state: int = 128
+    cv_folds: int = 0
     save_dir: str | None = None
     pos_label: Any = None
     estimator_names: tuple[str, ...] | None = None
@@ -89,6 +90,7 @@ def project_config_from_dict(
         test_size=float(pipeline_raw.get("test_size", 0.2)),
         stratify=bool(pipeline_raw.get("stratify", False)),
         random_state=int(pipeline_raw.get("random_state", 128)),
+        cv_folds=int(pipeline_raw.get("cv_folds", 0)),
         save_dir=_resolve_optional_path(pipeline_raw.get("save_dir"), base_path),
         pos_label=pipeline_raw.get("pos_label"),
         estimator_names=_optional_tuple(pipeline_raw.get("estimator_names")),
@@ -98,6 +100,8 @@ def project_config_from_dict(
         numeric=columns_raw.get("numeric", []),
         categorical=columns_raw.get("categorical", []),
         boolean=columns_raw.get("boolean", []),
+        datetime=columns_raw.get("datetime", []),
+        text=columns_raw.get("text", []),
     )
     preprocessing = PreprocessingConfig(
         feature_columns=feature_columns,
@@ -146,6 +150,7 @@ def project_config_from_dict(
         ),
         remainder=preprocessing_raw.get("remainder", "drop"),
         boolean_mapping=preprocessing_raw.get("boolean_mapping"),
+        text_max_features=int(preprocessing_raw.get("text_max_features", 1000)),
         stratified_categorical_columns=_optional_tuple(
             preprocessing_raw.get("stratified_categorical_columns")
         ),
@@ -260,6 +265,7 @@ def run_project_config(
         test_size=config.pipeline.test_size,
         stratify=config.pipeline.stratify,
         random_state=config.pipeline.random_state,
+        cv_folds=config.pipeline.cv_folds,
         save_dir=config.pipeline.save_dir,
         estimators=estimators,
         pos_label=config.pipeline.pos_label,

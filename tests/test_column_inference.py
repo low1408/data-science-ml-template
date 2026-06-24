@@ -13,6 +13,7 @@ def test_infer_feature_columns_skips_target_and_assigns_roles():
             "active": [True, False, True],
             "is_member": [1, 0, 1],
             "segment": ["a", "b", "a"],
+            "created_at": pd.to_datetime(["2024-01-01", "2024-01-02", None]),
             "target": [0, 1, 0],
         }
     )
@@ -26,3 +27,4 @@ def test_infer_feature_columns_skips_target_and_assigns_roles():
     assert columns.numeric == ("age",)
     assert columns.categorical == ("region_code", "segment")
     assert columns.boolean == ("active", "is_member")
+    assert columns.datetime == ("created_at",)
