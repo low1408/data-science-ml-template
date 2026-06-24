@@ -403,3 +403,93 @@ def _normalization_collisions(values: pd.Series) -> dict[str, list[Any]]:
 
 def _value_counts(values: pd.Series) -> dict[Any, int]:
     return values.value_counts(dropna=False).to_dict()
+
+
+def validate_pipeline_and_search_configs(
+    validation: Any,
+    search: Any,
+    task: str,
+    target_column: str,
+    feature_columns: Any,
+) -> None:
+    # 1. Validation method checks
+    VALID_VALIDATION_METHODS = {"holdout", "kfold", "stratified_kfold", "group_kfold", "time_series_split"}
+    if validation.method not in VALID_VALIDATION_METHODS:
+        raise ConfigurationError(
+            f"validation.method must be one of {sorted(VALID_VALIDATION_METHODS)}, got '{validation.method}'."
+        )
+
+    # 2. Split numeric boundaries
+    if validation.n_splits < 2:
+        raise ConfigurationError(f"validation.n_splits must be at least 2, got {validation.n_splits}.")
+    if not (0.0 < validation.test_size < 1.0):
+        raise ConfigurationError(f"validation.test_size must be between 0.0 and 1.0 (exclusive), got {validation.test_size}.")
+
+    # 3. Missing column checks
+    if validation.method == "group_kfold" and validation.groups_column is None:
+        raise ConfigurationError("validation.groups_column is required when validation.method is 'group_kfold'.")
+    if validation.method == "time_series_split" and validation.time_column is None:
+        raise ConfigurationError("validation.time_column is required when validation.method is 'time_series_split'.")
+
+    # 4. Stratified kfold + regression prevention
+    if validation.method == "stratified_kfold" and task == "regression":
+        raise ConfigurationError("validation.method 'stratified_kfold' is only supported for classification tasks.")
+
+    # 5. Prevent leakage: validation columns cannot be feature or target columns
+    all_features = set()
+    if feature_columns is not None:
+        all_features = (
+            set(feature_columns.numeric)
+            | set(feature_columns.categorical)
+            | set(feature_columns.boolean)
+            | set(feature_columns.datetime)
+            | set(feature_columns.text)
+        )
+    if validation.groups_column is not None:
+        if validation.groups_column in all_features:
+            raise ConfigurationError(
+                f"Validation groups column '{validation.groups_column}' cannot be included in the model feature columns."
+            )
+        if validation.groups_column == target_column:
+            raise ConfigurationError(
+                f"Validation groups column '{validation.groups_column}' cannot be the target column."
+            )
+    if validation.time_column is not None:
+        if validation.time_column in all_features:
+            raise ConfigurationError(
+                f"Validation time column '{validation.time_column}' cannot be included in the model feature columns."
+            )
+        if validation.time_column == target_column:
+            raise ConfigurationError(
+                f"Validation time column '{validation.time_column}' cannot be the target column."
+            )
+
+    # 6. Search checks
+    VALID_SEARCH_METHODS = {"none", "randomized", "grid"}
+    if search.method not in VALID_SEARCH_METHODS:
+        raise ConfigurationError(
+            f"search.method must be one of {sorted(VALID_SEARCH_METHODS)}, got '{search.method}'."
+        )
+
+    if search.method != "none":
+        if search.n_iter < 1:
+            raise ConfigurationError(f"search.n_iter must be at least 1, got {search.n_iter}.")
+        if search.refit is False:
+            raise ConfigurationError("search.refit=False is not supported because the pipeline requires a fitted model to evaluate on the holdout split.")
+
+        if isinstance(search.scoring, dict):
+            if isinstance(search.refit, bool):
+                raise ConfigurationError(
+                    "search.refit cannot be a boolean when search.scoring is a dictionary of multiple metrics. "
+                    "Please specify a string metric name from scoring."
+                )
+            if search.refit not in search.scoring:
+                raise ConfigurationError(
+                    f"search.refit metric '{search.refit}' must be one of the search.scoring keys: {list(search.scoring.keys())}."
+                )
+        else:
+            if isinstance(search.refit, str):
+                raise ConfigurationError(
+                    "search.refit can only be a string metric name when search.scoring is a dictionary of multiple metrics."
+                )
+

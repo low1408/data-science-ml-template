@@ -10,11 +10,13 @@ from pandas.api.types import is_bool_dtype, is_datetime64_any_dtype, is_numeric_
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.impute import MissingIndicator, SimpleImputer
+from sklearn.experimental import enable_iterative_imputer  # noqa: F401
+from sklearn.impute import KNNImputer, IterativeImputer, MissingIndicator, SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import (
     FunctionTransformer,
     KBinsDiscretizer,
+    MinMaxScaler,
     OneHotEncoder,
     OrdinalEncoder,
     PowerTransformer,
@@ -601,12 +603,14 @@ class PreprocessingConfig:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "imputer", self.imputer.lower())
-        if self.imputer not in {"simple", "stratified_hybrid"}:
-            raise ValueError("imputer must be either 'simple' or 'stratified_hybrid'.")
-        object.__setattr__(self, "numeric_scaler", self.numeric_scaler.lower())
-        if self.numeric_scaler not in {"none", "standard", "robust"}:
+        if self.imputer not in {"simple", "stratified_hybrid", "knn", "iterative"}:
             raise ValueError(
-                "numeric_scaler must be one of: 'none', 'standard', 'robust'."
+                "imputer must be one of: 'simple', 'stratified_hybrid', 'knn', 'iterative'."
+            )
+        object.__setattr__(self, "numeric_scaler", self.numeric_scaler.lower())
+        if self.numeric_scaler not in {"none", "standard", "robust", "minmax"}:
+            raise ValueError(
+                "numeric_scaler must be one of: 'none', 'standard', 'robust', 'minmax'."
             )
         object.__setattr__(
             self,
@@ -702,12 +706,17 @@ def build_preprocessor(
 ) -> ColumnTransformer:
     _validate_feature_columns(dataframe, config.feature_columns)
 
-    use_simple_imputer = config.imputer == "simple"
+    use_simple_imputer = config.imputer in {"simple", "knn", "iterative"}
     numeric_steps: list[tuple[str, object]] = []
     if use_simple_imputer:
-        numeric_steps.append(
-            ("imputer", SimpleImputer(strategy=config.numeric_imputer_strategy))
-        )
+        if config.imputer == "knn" or config.numeric_imputer_strategy == "knn":
+            numeric_steps.append(("imputer", KNNImputer()))
+        elif config.imputer == "iterative" or config.numeric_imputer_strategy in {"iterative", "mice"}:
+            numeric_steps.append(("imputer", IterativeImputer(random_state=0)))
+        else:
+            numeric_steps.append(
+                ("imputer", SimpleImputer(strategy=config.numeric_imputer_strategy))
+            )
     if config.cap_numeric_quantiles:
         numeric_steps.append(
             (
@@ -863,6 +872,8 @@ def _numeric_scaler(config: PreprocessingConfig) -> object | None:
         return StandardScaler()
     if config.numeric_scaler == "robust":
         return RobustScaler()
+    if config.numeric_scaler == "minmax":
+        return MinMaxScaler()
     return None
 
 
