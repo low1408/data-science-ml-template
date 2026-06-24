@@ -71,6 +71,38 @@ boolean = ["is_active"]
 scale_numeric = true
 ```
 
+Optional numeric and categorical transforms are disabled by default. Enable them
+only when they fit the dataset and model family:
+
+```toml
+[preprocessing]
+numeric_imputer_strategy = "median"
+scale_numeric = true
+numeric_scaler = "robust"              # "none", "standard", or "robust"
+
+cap_numeric_quantiles = true
+quantile_cap_lower = 0.01
+quantile_cap_upper = 0.99
+
+numeric_power_transform = "yeo_johnson"  # "none", "yeo_johnson", or "box_cox"
+numeric_distribution_transform = "none"  # "none", "quantile_uniform", or "quantile_normal"
+numeric_binning = "none"                 # "none", "uniform", "quantile", or "kmeans"
+numeric_bin_count = 10
+
+categorical_encoding = "frequency"       # "onehot", "frequency", or "ordinal"
+group_rare_categories = true
+rare_category_min_frequency = 0.01
+frequency_unknown_value = 0.0
+
+add_simple_missing_indicators = true
+```
+
+Use `numeric_power_transform = "box_cox"` only for strictly positive numeric
+features. The Box-Cox transformer raises a clear error for zero or negative
+values instead of silently shifting the data. Power transforms and quantile
+distribution transforms are mutually exclusive because both reshape numeric
+distributions.
+
 To use cohort-aware stratified imputation instead of the default sklearn
 `SimpleImputer` steps, set `imputer = "stratified_hybrid"` and provide the
 grouping columns used for the lookups. The imputer fills configured categorical

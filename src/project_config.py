@@ -103,6 +103,35 @@ def project_config_from_dict(
         feature_columns=feature_columns,
         imputer=preprocessing_raw.get("imputer", "simple"),
         scale_numeric=bool(preprocessing_raw.get("scale_numeric", False)),
+        numeric_scaler=preprocessing_raw.get("numeric_scaler", "none"),
+        cap_numeric_quantiles=bool(
+            preprocessing_raw.get("cap_numeric_quantiles", False)
+        ),
+        quantile_cap_lower=float(preprocessing_raw.get("quantile_cap_lower", 0.01)),
+        quantile_cap_upper=float(preprocessing_raw.get("quantile_cap_upper", 0.99)),
+        numeric_power_transform=preprocessing_raw.get("numeric_power_transform", "none"),
+        numeric_distribution_transform=preprocessing_raw.get(
+            "numeric_distribution_transform",
+            "none",
+        ),
+        quantile_transform_n_quantiles=int(
+            preprocessing_raw.get("quantile_transform_n_quantiles", 1000)
+        ),
+        numeric_binning=preprocessing_raw.get("numeric_binning", "none"),
+        numeric_bin_count=int(preprocessing_raw.get("numeric_bin_count", 10)),
+        categorical_encoding=preprocessing_raw.get("categorical_encoding", "onehot"),
+        group_rare_categories=bool(
+            preprocessing_raw.get("group_rare_categories", False)
+        ),
+        rare_category_min_frequency=float(
+            preprocessing_raw.get("rare_category_min_frequency", 0.01)
+        ),
+        frequency_unknown_value=float(
+            preprocessing_raw.get("frequency_unknown_value", 0.0)
+        ),
+        add_simple_missing_indicators=bool(
+            preprocessing_raw.get("add_simple_missing_indicators", False)
+        ),
         numeric_imputer_strategy=preprocessing_raw.get(
             "numeric_imputer_strategy",
             "median",

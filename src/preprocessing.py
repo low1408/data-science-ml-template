@@ -4,13 +4,23 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from pandas.api.types import is_bool_dtype, is_numeric_dtype
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
+from sklearn.impute import MissingIndicator, SimpleImputer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
+from sklearn.preprocessing import (
+    FunctionTransformer,
+    KBinsDiscretizer,
+    OneHotEncoder,
+    OrdinalEncoder,
+    PowerTransformer,
+    QuantileTransformer,
+    RobustScaler,
+    StandardScaler,
+)
 
 from src.features import FeaturePipeline, FeatureRole, SklearnFeaturePipeline
 
@@ -101,6 +111,15 @@ DEFAULT_BOOLEAN_MAPPING = {
 }
 
 
+def _as_dataframe(
+    X: pd.DataFrame | np.ndarray,
+    columns: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    if isinstance(X, pd.DataFrame):
+        return X.copy()
+    return pd.DataFrame(X, columns=columns)
+
+
 class BooleanMappingTransformer(BaseEstimator, TransformerMixin):
     def __init__(self, mapping: dict[Any, int] | None = None) -> None:
         self.mapping = mapping
@@ -138,6 +157,180 @@ class BooleanMappingTransformer(BaseEstimator, TransformerMixin):
             return X_df.map(map_value)
         else:
             return X_df.applymap(map_value)
+
+
+class QuantileCapper(BaseEstimator, TransformerMixin):
+    """Clip numeric columns to quantiles learned from the training data."""
+
+    def __init__(
+        self,
+        lower_quantile: float = 0.01,
+        upper_quantile: float = 0.99,
+    ) -> None:
+        self.lower_quantile = lower_quantile
+        self.upper_quantile = upper_quantile
+
+    def fit(self, X: pd.DataFrame | np.ndarray, y: Any = None) -> QuantileCapper:
+        self._validate_quantiles()
+        X_df = _as_dataframe(X)
+        self.feature_names_in_ = np.asarray(X_df.columns, dtype=object)
+        numeric = X_df.apply(pd.to_numeric, errors="coerce")
+        self.lower_bounds_ = numeric.quantile(self.lower_quantile)
+        self.upper_bounds_ = numeric.quantile(self.upper_quantile)
+        return self
+
+    def transform(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
+        X_df = _as_dataframe(X, tuple(self.feature_names_in_))
+        numeric = X_df.apply(pd.to_numeric, errors="coerce")
+        clipped = numeric.clip(
+            lower=self.lower_bounds_,
+            upper=self.upper_bounds_,
+            axis="columns",
+        )
+        return clipped.to_numpy()
+
+    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+        if input_features is not None:
+            return np.asarray(input_features, dtype=object)
+        return self.feature_names_in_
+
+    def _validate_quantiles(self) -> None:
+        if not 0.0 <= self.lower_quantile < self.upper_quantile <= 1.0:
+            raise ValueError(
+                "QuantileCapper requires 0.0 <= lower_quantile < upper_quantile <= 1.0."
+            )
+
+
+class FrequencyEncoder(BaseEstimator, TransformerMixin):
+    """Encode categories by their training-set relative frequency."""
+
+    def __init__(
+        self,
+        *,
+        unknown_value: float = 0.0,
+        missing_label: str = "__MISSING__",
+    ) -> None:
+        self.unknown_value = unknown_value
+        self.missing_label = missing_label
+
+    def fit(self, X: pd.DataFrame | np.ndarray, y: Any = None) -> FrequencyEncoder:
+        X_df = _as_dataframe(X)
+        self.feature_names_in_ = np.asarray(X_df.columns, dtype=object)
+        denominator = len(X_df)
+        self.frequencies_: dict[str, pd.Series] = {}
+        for column in X_df.columns:
+            key = self._working_key(X_df[column])
+            self.frequencies_[column] = key.value_counts(dropna=False) / denominator
+        return self
+
+    def transform(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
+        X_df = _as_dataframe(X, tuple(self.feature_names_in_))
+        encoded = pd.DataFrame(index=X_df.index)
+        for column in X_df.columns:
+            key = self._working_key(X_df[column])
+            encoded[column] = key.map(self.frequencies_[column]).fillna(
+                self.unknown_value
+            )
+        return encoded.astype("float64").to_numpy()
+
+    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+        feature_names = (
+            input_features if input_features is not None else self.feature_names_in_
+        )
+        return np.asarray(feature_names, dtype=object)
+
+    def _working_key(self, series: pd.Series) -> pd.Series:
+        return series.astype("object").where(series.notna(), self.missing_label)
+
+
+class RareCategoryGrouper(BaseEstimator, TransformerMixin):
+    """Group low-frequency categories under a stable rare-category label."""
+
+    def __init__(
+        self,
+        *,
+        min_frequency: float = 0.01,
+        rare_label: str = "__RARE__",
+        missing_label: str = "__MISSING__",
+    ) -> None:
+        self.min_frequency = min_frequency
+        self.rare_label = rare_label
+        self.missing_label = missing_label
+
+    def fit(self, X: pd.DataFrame | np.ndarray, y: Any = None) -> RareCategoryGrouper:
+        if not 0.0 <= self.min_frequency <= 1.0:
+            raise ValueError("min_frequency must be between 0.0 and 1.0.")
+        X_df = _as_dataframe(X)
+        self.feature_names_in_ = np.asarray(X_df.columns, dtype=object)
+        self.frequent_categories_: dict[str, set[Any]] = {}
+        for column in X_df.columns:
+            key = self._working_key(X_df[column])
+            frequencies = key.value_counts(dropna=False) / len(key)
+            self.frequent_categories_[column] = set(
+                frequencies[frequencies >= self.min_frequency].index
+            )
+        return self
+
+    def transform(self, X: pd.DataFrame | np.ndarray) -> pd.DataFrame:
+        X_df = _as_dataframe(X, tuple(self.feature_names_in_))
+        grouped = pd.DataFrame(index=X_df.index)
+        for column in X_df.columns:
+            key = self._working_key(X_df[column])
+            grouped[column] = key.where(
+                key.isin(self.frequent_categories_[column]),
+                self.rare_label,
+            )
+        return grouped
+
+    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+        feature_names = (
+            input_features if input_features is not None else self.feature_names_in_
+        )
+        return np.asarray(feature_names, dtype=object)
+
+    def _working_key(self, series: pd.Series) -> pd.Series:
+        return series.astype("object").where(series.notna(), self.missing_label)
+
+
+class PositiveBoxCoxTransformer(BaseEstimator, TransformerMixin):
+    """Box-Cox power transform with explicit positive-value validation."""
+
+    def __init__(self, *, standardize: bool = False) -> None:
+        self.standardize = standardize
+
+    def fit(
+        self,
+        X: pd.DataFrame | np.ndarray,
+        y: Any = None,
+    ) -> PositiveBoxCoxTransformer:
+        X_df = _as_dataframe(X)
+        self.feature_names_in_ = np.asarray(X_df.columns, dtype=object)
+        values = X_df.apply(pd.to_numeric, errors="coerce").to_numpy()
+        self._validate_positive(values)
+        self.transformer_ = PowerTransformer(
+            method="box-cox",
+            standardize=self.standardize,
+        )
+        self.transformer_.fit(values)
+        return self
+
+    def transform(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
+        X_df = _as_dataframe(X, tuple(self.feature_names_in_))
+        values = X_df.apply(pd.to_numeric, errors="coerce").to_numpy()
+        self._validate_positive(values)
+        return self.transformer_.transform(values)
+
+    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+        if input_features is not None:
+            return np.asarray(input_features, dtype=object)
+        return self.feature_names_in_
+
+    def _validate_positive(self, values: np.ndarray) -> None:
+        valid_values = values[~np.isnan(values)]
+        if valid_values.size and np.any(valid_values <= 0):
+            raise ValueError(
+                "Box-Cox power transform requires strictly positive numeric values."
+            )
 
 
 class StratifiedHybridImputer(BaseEstimator, TransformerMixin):
@@ -282,6 +475,20 @@ class PreprocessingConfig:
     feature_columns: FeatureColumns
     imputer: str = "simple"
     scale_numeric: bool = False
+    numeric_scaler: str = "none"
+    cap_numeric_quantiles: bool = False
+    quantile_cap_lower: float = 0.01
+    quantile_cap_upper: float = 0.99
+    numeric_power_transform: str = "none"
+    numeric_distribution_transform: str = "none"
+    quantile_transform_n_quantiles: int = 1000
+    numeric_binning: str = "none"
+    numeric_bin_count: int = 10
+    categorical_encoding: str = "onehot"
+    group_rare_categories: bool = False
+    rare_category_min_frequency: float = 0.01
+    frequency_unknown_value: float = 0.0
+    add_simple_missing_indicators: bool = False
     numeric_imputer_strategy: str = "median"
     categorical_imputer_strategy: str = "most_frequent"
     boolean_imputer_strategy: str = "most_frequent"
@@ -299,6 +506,72 @@ class PreprocessingConfig:
         object.__setattr__(self, "imputer", self.imputer.lower())
         if self.imputer not in {"simple", "stratified_hybrid"}:
             raise ValueError("imputer must be either 'simple' or 'stratified_hybrid'.")
+        object.__setattr__(self, "numeric_scaler", self.numeric_scaler.lower())
+        if self.numeric_scaler not in {"none", "standard", "robust"}:
+            raise ValueError(
+                "numeric_scaler must be one of: 'none', 'standard', 'robust'."
+            )
+        object.__setattr__(
+            self,
+            "numeric_power_transform",
+            self.numeric_power_transform.lower(),
+        )
+        if self.numeric_power_transform not in {"none", "yeo_johnson", "box_cox"}:
+            raise ValueError(
+                "numeric_power_transform must be one of: "
+                "'none', 'yeo_johnson', 'box_cox'."
+            )
+        object.__setattr__(
+            self,
+            "numeric_distribution_transform",
+            self.numeric_distribution_transform.lower(),
+        )
+        if self.numeric_distribution_transform not in {
+            "none",
+            "quantile_uniform",
+            "quantile_normal",
+        }:
+            raise ValueError(
+                "numeric_distribution_transform must be one of: "
+                "'none', 'quantile_uniform', 'quantile_normal'."
+            )
+        if (
+            self.numeric_power_transform != "none"
+            and self.numeric_distribution_transform != "none"
+        ):
+            raise ValueError(
+                "numeric_power_transform and numeric_distribution_transform "
+                "are mutually exclusive."
+            )
+        object.__setattr__(self, "numeric_binning", self.numeric_binning.lower())
+        if self.numeric_binning not in {"none", "uniform", "quantile", "kmeans"}:
+            raise ValueError(
+                "numeric_binning must be one of: "
+                "'none', 'uniform', 'quantile', 'kmeans'."
+            )
+        if self.numeric_bin_count < 2:
+            raise ValueError("numeric_bin_count must be at least 2.")
+        object.__setattr__(
+            self,
+            "categorical_encoding",
+            self.categorical_encoding.lower(),
+        )
+        if self.categorical_encoding not in {"onehot", "frequency", "ordinal"}:
+            raise ValueError(
+                "categorical_encoding must be one of: "
+                "'onehot', 'frequency', 'ordinal'."
+            )
+        if not 0.0 <= self.quantile_cap_lower < self.quantile_cap_upper <= 1.0:
+            raise ValueError(
+                "Quantile caps require "
+                "0.0 <= quantile_cap_lower < quantile_cap_upper <= 1.0."
+            )
+        if not 0.0 <= self.rare_category_min_frequency <= 1.0:
+            raise ValueError(
+                "rare_category_min_frequency must be between 0.0 and 1.0."
+            )
+        if self.quantile_transform_n_quantiles < 1:
+            raise ValueError("quantile_transform_n_quantiles must be at least 1.")
         for field_name in (
             "stratified_categorical_columns",
             "stratified_numeric_columns",
@@ -331,8 +604,53 @@ def build_preprocessor(
         numeric_steps.append(
             ("imputer", SimpleImputer(strategy=config.numeric_imputer_strategy))
         )
-    if config.scale_numeric:
-        numeric_steps.append(("scaler", StandardScaler()))
+    if config.cap_numeric_quantiles:
+        numeric_steps.append(
+            (
+                "quantile_capper",
+                QuantileCapper(
+                    lower_quantile=config.quantile_cap_lower,
+                    upper_quantile=config.quantile_cap_upper,
+                ),
+            )
+        )
+    if config.numeric_power_transform == "yeo_johnson":
+        numeric_steps.append(
+            ("power", PowerTransformer(method="yeo-johnson", standardize=False))
+        )
+    elif config.numeric_power_transform == "box_cox":
+        numeric_steps.append(("power", PositiveBoxCoxTransformer(standardize=False)))
+    if config.numeric_distribution_transform != "none":
+        distribution = (
+            "normal"
+            if config.numeric_distribution_transform == "quantile_normal"
+            else "uniform"
+        )
+        n_quantiles = min(config.quantile_transform_n_quantiles, len(dataframe))
+        numeric_steps.append(
+            (
+                "distribution",
+                QuantileTransformer(
+                    n_quantiles=n_quantiles,
+                    output_distribution=distribution,
+                    random_state=0,
+                ),
+            )
+        )
+    if config.numeric_binning != "none":
+        numeric_steps.append(
+            (
+                "binning",
+                KBinsDiscretizer(
+                    n_bins=config.numeric_bin_count,
+                    encode="onehot-dense",
+                    strategy=config.numeric_binning,
+                ),
+            )
+        )
+    scaler = _numeric_scaler(config)
+    if scaler is not None:
+        numeric_steps.append(("scaler", scaler))
     if not numeric_steps:
         numeric_steps.append(("identity", FunctionTransformer()))
 
@@ -341,7 +659,35 @@ def build_preprocessor(
         categorical_steps.append(
             ("imputer", SimpleImputer(strategy=config.categorical_imputer_strategy))
         )
-    categorical_steps.append(("onehot", OneHotEncoder(handle_unknown="ignore")))
+    if config.group_rare_categories:
+        categorical_steps.append(
+            (
+                "rare_categories",
+                RareCategoryGrouper(
+                    min_frequency=config.rare_category_min_frequency
+                ),
+            )
+        )
+    if config.categorical_encoding == "onehot":
+        categorical_steps.append(("onehot", OneHotEncoder(handle_unknown="ignore")))
+    elif config.categorical_encoding == "frequency":
+        categorical_steps.append(
+            (
+                "frequency",
+                FrequencyEncoder(unknown_value=config.frequency_unknown_value),
+            )
+        )
+    else:
+        categorical_steps.append(
+            (
+                "ordinal",
+                OrdinalEncoder(
+                    handle_unknown="use_encoded_value",
+                    unknown_value=-1,
+                    encoded_missing_value=-2,
+                ),
+            )
+        )
 
     categorical_pipeline = Pipeline(steps=categorical_steps)
     boolean_steps: list[tuple[str, object]] = [
@@ -374,8 +720,27 @@ def build_preprocessor(
                 indicator_columns,
             )
         )
+    simple_indicator_columns = _simple_indicator_columns(config)
+    if simple_indicator_columns:
+        transformers.append(
+            (
+                "simple_missing_indicators",
+                Pipeline([("indicator", MissingIndicator(features="all"))]),
+                simple_indicator_columns,
+            )
+        )
 
     return ColumnTransformer(transformers=transformers, remainder=config.remainder)
+
+
+def _numeric_scaler(config: PreprocessingConfig) -> object | None:
+    if config.numeric_scaler == "standard" or (
+        config.scale_numeric and config.numeric_scaler == "none"
+    ):
+        return StandardScaler()
+    if config.numeric_scaler == "robust":
+        return RobustScaler()
+    return None
 
 
 def build_imputer(config: PreprocessingConfig) -> StratifiedHybridImputer | None:
@@ -415,6 +780,20 @@ def _stratified_indicator_columns(config: PreprocessingConfig) -> tuple[str, ...
     )
     target_columns = tuple(dict.fromkeys((*categorical_columns, *numeric_columns)))
     return tuple(f"is_{column}_missing" for column in target_columns)
+
+
+def _simple_indicator_columns(config: PreprocessingConfig) -> tuple[str, ...]:
+    if config.imputer != "simple" or not config.add_simple_missing_indicators:
+        return ()
+    return tuple(
+        dict.fromkeys(
+            (
+                *config.feature_columns.numeric,
+                *config.feature_columns.categorical,
+                *config.feature_columns.boolean,
+            )
+        )
+    )
 
 
 def build_model_pipeline(
