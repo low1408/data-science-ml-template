@@ -71,6 +71,24 @@ boolean = ["is_active"]
 scale_numeric = true
 ```
 
+To use cohort-aware stratified imputation instead of the default sklearn
+`SimpleImputer` steps, set `imputer = "stratified_hybrid"` and provide the
+grouping columns used for the lookups. The imputer fills configured categorical
+columns from categorical cohorts, configured numeric columns from numeric
+cohorts, then falls back to the fallback group and finally the global
+mode/median.
+
+```toml
+[preprocessing]
+imputer = "stratified_hybrid"
+scale_numeric = true
+stratified_categorical_group_cols = ["branch", "client_id"]
+stratified_numeric_group_cols = ["client_id", "parcel_category"]
+stratified_fallback_group_col = "branch"
+stratified_min_samples = 1
+add_missing_indicators = true
+```
+
 Reproducible Run Outputs
 ------------------------
 

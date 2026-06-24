@@ -38,6 +38,38 @@ def test_project_config_from_dict_builds_runtime_objects():
     assert config.schema.required_columns == ("age", "region", "active", "target")
 
 
+def test_project_config_loads_stratified_hybrid_imputer_settings():
+    config = project_config_from_dict(
+        {
+            "data": {"kind": "csv", "path": "data.csv"},
+            "pipeline": {
+                "target_column": "target",
+                "task": "classification",
+            },
+            "columns": {
+                "numeric": ["parcel_weight_kg"],
+                "categorical": ["payment_method"],
+            },
+            "preprocessing": {
+                "imputer": "stratified_hybrid",
+                "stratified_categorical_group_cols": ["branch", "client_id"],
+                "stratified_numeric_group_cols": ["client_id", "parcel_category"],
+                "stratified_fallback_group_col": "branch",
+                "stratified_min_samples": 2,
+                "add_missing_indicators": False,
+            },
+        }
+    )
+
+    assert config.preprocessing.imputer == "stratified_hybrid"
+    assert config.preprocessing.stratified_min_samples == 2
+    assert config.preprocessing.add_missing_indicators is False
+    assert config.preprocessing.stratified_numeric_group_cols == (
+        "client_id",
+        "parcel_category",
+    )
+
+
 def test_run_project_config_loads_csv_and_saves_reproducible_artifacts(tmp_path):
     dataframe = pd.DataFrame(
         {

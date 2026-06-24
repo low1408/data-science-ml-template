@@ -101,6 +101,7 @@ def project_config_from_dict(
     )
     preprocessing = PreprocessingConfig(
         feature_columns=feature_columns,
+        imputer=preprocessing_raw.get("imputer", "simple"),
         scale_numeric=bool(preprocessing_raw.get("scale_numeric", False)),
         numeric_imputer_strategy=preprocessing_raw.get(
             "numeric_imputer_strategy",
@@ -116,6 +117,32 @@ def project_config_from_dict(
         ),
         remainder=preprocessing_raw.get("remainder", "drop"),
         boolean_mapping=preprocessing_raw.get("boolean_mapping"),
+        stratified_categorical_columns=_optional_tuple(
+            preprocessing_raw.get("stratified_categorical_columns")
+        ),
+        stratified_numeric_columns=_optional_tuple(
+            preprocessing_raw.get("stratified_numeric_columns")
+        ),
+        stratified_categorical_group_cols=tuple(
+            preprocessing_raw.get(
+                "stratified_categorical_group_cols",
+                ("branch", "client_id"),
+            )
+        ),
+        stratified_numeric_group_cols=tuple(
+            preprocessing_raw.get(
+                "stratified_numeric_group_cols",
+                ("client_id", "parcel_category"),
+            )
+        ),
+        stratified_fallback_group_col=preprocessing_raw.get(
+            "stratified_fallback_group_col",
+            "branch",
+        ),
+        stratified_min_samples=int(preprocessing_raw.get("stratified_min_samples", 1)),
+        add_missing_indicators=bool(
+            preprocessing_raw.get("add_missing_indicators", True)
+        ),
     )
 
     schema = _build_schema(schema_raw) if schema_raw is not None else None
