@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import pandas as pd
@@ -12,7 +12,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
 
-from src.features import FeaturePipeline, SklearnFeaturePipeline
+from src.features import FeaturePipeline, FeatureRole, SklearnFeaturePipeline
 
 
 @dataclass(frozen=True)
@@ -428,6 +428,7 @@ def build_model_pipeline(
     if feature_pipeline is not None:
         steps.append(("feature_engineering", SklearnFeaturePipeline(feature_pipeline)))
         dataframe = feature_pipeline.transform(dataframe)
+        config = with_feature_pipeline_columns(config, feature_pipeline)
     imputer = build_imputer(config)
     if imputer is not None:
         steps.append(("imputer", imputer))
@@ -443,6 +444,55 @@ def build_model_pipeline(
         ("model", estimator),
     ])
     return Pipeline(steps=steps)
+
+
+def with_feature_pipeline_columns(
+    config: PreprocessingConfig,
+    feature_pipeline: FeaturePipeline,
+) -> PreprocessingConfig:
+    """Return config with generated feature columns added to their declared roles."""
+    numeric = list(config.feature_columns.numeric)
+    categorical = list(config.feature_columns.categorical)
+    boolean = list(config.feature_columns.boolean)
+    role_columns: dict[FeatureRole, list[str]] = {
+        "numeric": numeric,
+        "categorical": categorical,
+        "boolean": boolean,
+    }
+
+    configured_roles: dict[str, FeatureRole] = {}
+    for role, columns in role_columns.items():
+        for column in columns:
+            existing_role = configured_roles.get(column)
+            if existing_role is not None and existing_role != role:
+                raise ValueError(
+                    "Feature columns can only belong to one role. "
+                    f"Column {column!r} is configured as both "
+                    f"{existing_role!r} and {role!r}."
+                )
+            configured_roles[column] = role
+
+    for feature in feature_pipeline.features:
+        configured_role = configured_roles.get(feature.name)
+        if configured_role is not None:
+            if configured_role != feature.role:
+                raise ValueError(
+                    f"Feature {feature.name!r} declares role {feature.role!r} "
+                    f"but is configured as {configured_role!r}."
+                )
+            continue
+        role_columns[feature.role].append(feature.name)
+        configured_roles[feature.name] = feature.role
+
+    return replace(
+        config,
+        feature_columns=FeatureColumns(
+            numeric=numeric,
+            categorical=categorical,
+            boolean=boolean,
+        ),
+    )
+
 
 def _validate_feature_columns(dataframe: pd.DataFrame, columns: FeatureColumns) -> None:
     configured_columns = (

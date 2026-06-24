@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import pandas as pd
 from src import (
     Feature,
     FeatureColumns,
@@ -9,14 +8,6 @@ from src import (
     SQLiteDataLoader,
     run_pipeline,
 )
-
-# 1. Define a dummy feature that computes ExitRate to BounceRate ratio
-class ExitBounceRatioFeature(Feature):
-    def _transform(self, frame: pd.DataFrame) -> pd.Series:
-        # ExitRate and BounceRate are numeric columns in the database.
-        # Adding a small constant to prevent division by zero.
-        ratio = frame["ExitRate"] / (frame["BounceRate"] + 1e-5)
-        return ratio.rename(self.name)
 
 
 def main() -> None:
@@ -27,16 +18,24 @@ def main() -> None:
 
     # 2. Instantiate our FeaturePipeline with the custom feature
     print("\n2. Initializing custom feature engineering pipeline...")
-    ratio_feature = ExitBounceRatioFeature(
+    ratio_feature = Feature.from_fn(
         name="exit_bounce_ratio",
-        requires=["ExitRate", "BounceRate"]
+        requires=["ExitRate", "BounceRate"],
+        fn=lambda df: df["ExitRate"] / (df["BounceRate"] + 1e-5),
+        role="numeric",
     )
     feature_pipeline = FeaturePipeline([ratio_feature])
 
     # 3. Configure preprocessing roles
-    # "exit_bounce_ratio" is not present in df, but will be generated on the fly.
+    # "exit_bounce_ratio" is registered through ratio_feature.role.
     feature_columns = FeatureColumns(
-        numeric=["SpecialDayProximity", "ExitRate", "BounceRate", "PageValue", "ProductPageTime", "exit_bounce_ratio"],
+        numeric=[
+            "SpecialDayProximity",
+            "ExitRate",
+            "BounceRate",
+            "PageValue",
+            "ProductPageTime",
+        ],
         categorical=["CustomerType", "TrafficSource", "GeographicRegion"],
         boolean=[]
     )
@@ -62,7 +61,10 @@ def main() -> None:
 
     # 5. Verify inference works on raw unseen data (which does not contain the exit_bounce_ratio column)
     print("\n4. Verifying inference on new raw data...")
-    raw_sample = df.drop(columns=["PurchaseCompleted", "exit_bounce_ratio"], errors="ignore").head(3)
+    raw_sample = df.drop(
+        columns=["PurchaseCompleted", "exit_bounce_ratio"],
+        errors="ignore",
+    ).head(3)
     print("Input data to predict (raw columns only):")
     print(raw_sample[["ExitRate", "BounceRate", "CustomerType"]])
 

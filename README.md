@@ -105,10 +105,27 @@ pipelines, inference should use the same raw input columns as training.
 Custom Feature Engineering
 --------------------------
 
-Subclass `src.features.Feature` for deterministic one-column features, then pass
-a `FeaturePipeline` to `run_pipeline()`. The feature layer validates dependency
-order, duplicate names, row count, index preservation, and accidental input dtype
-mutation.
+Use `Feature.from_fn()` for simple deterministic one-column features, then pass
+a `FeaturePipeline` to `run_pipeline()`. The feature role is registered on the
+feature itself, so generated columns are added to preprocessing automatically.
+
+```python
+feature_pipeline = FeaturePipeline([
+    Feature.from_fn(
+        name="exit_bounce_ratio",
+        requires=["ExitRate", "BounceRate"],
+        fn=lambda df: df["ExitRate"] / (df["BounceRate"] + 1e-5),
+        role="numeric",
+    )
+])
+```
+
+When saving fitted pipelines with joblib, pass a module-level function instead
+of a lambda so the callable can be pickled.
+
+Subclassing `src.features.Feature` is still supported for complex or stateful
+transforms. The feature layer validates dependency order, duplicate names, row
+count, index preservation, name matching, and accidental input dtype mutation.
 
 Project Layout
 --------------

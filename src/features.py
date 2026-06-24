@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
+
+FeatureRole = Literal["numeric", "categorical", "boolean"]
+VALID_FEATURE_ROLES: tuple[FeatureRole, ...] = ("numeric", "categorical", "boolean")
 
 
 def validate_columns(frame: pd.DataFrame, columns: Sequence[str], frame_name: str) -> None:
@@ -35,10 +38,23 @@ class Feature(ABC):
 
     name: str
     requires: tuple[str, ...]
+    role: FeatureRole
 
-    def __init__(self, *, name: str, requires: Sequence[str]) -> None:
+    def __init__(
+        self,
+        *,
+        name: str,
+        requires: Sequence[str],
+        role: FeatureRole = "numeric",
+    ) -> None:
+        if role not in VALID_FEATURE_ROLES:
+            raise ValueError(
+                "Feature role must be one of "
+                f"{list(VALID_FEATURE_ROLES)}, got {role!r}."
+            )
         self.name = name
         self.requires = tuple(requires)
+        self.role = role
 
     def transform(self, frame: pd.DataFrame) -> pd.Series:
         validate_columns(frame, self.requires, frame_name=f"feature {self.name!r}")
@@ -58,6 +74,33 @@ class Feature(ABC):
     @abstractmethod
     def _transform(self, frame: pd.DataFrame) -> pd.Series:
         raise NotImplementedError
+
+    @classmethod
+    def from_fn(
+        cls,
+        name: str,
+        requires: Sequence[str],
+        fn: Callable[[pd.DataFrame], pd.Series],
+        role: FeatureRole = "numeric",
+    ) -> Feature:
+        """Create a deterministic one-column feature from a callable."""
+        return _CallableFeature(name=name, requires=requires, fn=fn, role=role)
+
+
+class _CallableFeature(Feature):
+    def __init__(
+        self,
+        *,
+        name: str,
+        requires: Sequence[str],
+        fn: Callable[[pd.DataFrame], pd.Series],
+        role: FeatureRole = "numeric",
+    ) -> None:
+        super().__init__(name=name, requires=requires, role=role)
+        self.fn = fn
+
+    def _transform(self, frame: pd.DataFrame) -> pd.Series:
+        return self.fn(frame).rename(self.name)
 
 
 @dataclass(frozen=True)

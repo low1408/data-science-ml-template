@@ -33,6 +33,7 @@ from src.preprocessing import (
     build_model_pipeline,
     build_preprocessor,
     infer_feature_columns,
+    with_feature_pipeline_columns,
 )
 from src.pipeline import run_pipeline
 from src.project_config import (
@@ -47,6 +48,7 @@ from src.project_config import (
 from src.features import (
     EDAOnlyFeature,
     Feature,
+    FeatureRole,
     FeaturePipeline,
     SklearnFeaturePipeline,
 )
@@ -77,6 +79,7 @@ __all__ = [
     "DataSchema",
     "DataValidationError",
     "Feature",
+    "FeatureRole",
     "FeaturePipeline",
     "FeatureColumns",
     "ParquetDataLoader",
@@ -109,4 +112,5 @@ __all__ = [
     "train_baseline_models",
     "train_test_split_dataframe",
     "validate_dataframe",
+    "with_feature_pipeline_columns",
 ]

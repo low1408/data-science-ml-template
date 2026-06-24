@@ -248,6 +248,8 @@ def _build_schema(raw: dict[str, Any]) -> DataSchema:
             column: tuple(bounds)
             for column, bounds in raw.get("ranges", {}).items()
         },
+        categorical_hygiene_columns=raw.get("categorical_hygiene_columns", []),
+        allowed_categories=raw.get("allowed_categories", {}),
     )
 
 
