@@ -32,6 +32,15 @@ from src.preprocessing import (
     build_preprocessor,
 )
 from src.pipeline import run_pipeline
+from src.project_config import (
+    DataSourceConfig,
+    PipelineConfig,
+    ProjectConfig,
+    load_dataframe_from_config,
+    load_project_config,
+    project_config_from_dict,
+    run_project_config,
+)
 from src.features import (
     EDAOnlyFeature,
     Feature,
@@ -53,10 +62,13 @@ __all__ = [
     "CSVDataLoader",
     "ConfigurationError",
     "DATA_DIR",
+    "DataSourceConfig",
     "EDAOnlyFeature",
     "MODELS_DIR",
+    "PipelineConfig",
     "PreprocessingConfig",
     "PROJECT_ROOT",
+    "ProjectConfig",
     "RANDOM_STATE",
     "DataSchema",
     "DataValidationError",
@@ -78,9 +90,13 @@ __all__ = [
     "compare_models",
     "dataset_summary",
     "evaluate_model",
+    "load_dataframe_from_config",
     "load_model",
+    "load_project_config",
     "model_comparison_table",
+    "project_config_from_dict",
     "regression_metrics",
+    "run_project_config",
     "save_model",
     "SklearnFeaturePipeline",
     "split_features_target",
