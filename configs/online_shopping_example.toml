@@ -1,0 +1,50 @@
+[data]
+kind = "sqlite_table"
+path = "../data/online_shopping.db"
+table_name = "online_shopping"
+
+[pipeline]
+target_column = "PurchaseCompleted"
+task = "classification"
+test_size = 0.2
+stratify = true
+random_state = 128
+save_dir = "../runs/online_shopping"
+estimator_names = ["dummy", "logistic_regression", "random_forest"]
+
+[columns]
+numeric = [
+  "SpecialDayProximity",
+  "ExitRate",
+  "PageValue",
+  "BounceRate",
+  "ProductPageTime",
+]
+categorical = [
+  "CustomerType",
+  "TrafficSource",
+  "GeographicRegion",
+]
+boolean = []
+
+[preprocessing]
+scale_numeric = true
+numeric_imputer_strategy = "median"
+categorical_imputer_strategy = "most_frequent"
+remainder = "drop"
+
+[schema]
+required_columns = [
+  "CustomerType",
+  "SpecialDayProximity",
+  "ExitRate",
+  "PageValue",
+  "TrafficSource",
+  "GeographicRegion",
+  "BounceRate",
+  "ProductPageTime",
+  "PurchaseCompleted",
+]
+
+[schema.null_limits]
+PurchaseCompleted = 0.0
