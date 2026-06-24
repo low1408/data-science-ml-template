@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
 
 import joblib
+import pandas as pd
 
 from src.config import MODELS_DIR
 from src.data import resolve_path
@@ -64,3 +66,31 @@ def load_model(
     path = resolve_path(file_path, base_path, confine_to_base=True)
     return joblib.load(path)
 
+
+def save_json(
+    payload: dict[str, Any],
+    file_path: str | Path,
+    *,
+    base_path: str | Path = MODELS_DIR,
+) -> Path:
+    """Save a JSON-serializable payload beneath ``base_path``."""
+    path = resolve_path(file_path, base_path, confine_to_base=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    return path
+
+
+def save_dataframe(
+    dataframe: pd.DataFrame,
+    file_path: str | Path,
+    *,
+    base_path: str | Path = MODELS_DIR,
+) -> Path:
+    """Save a dataframe as CSV beneath ``base_path``."""
+    path = resolve_path(file_path, base_path, confine_to_base=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dataframe.to_csv(path)
+    return path
