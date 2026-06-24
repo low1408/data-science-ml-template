@@ -16,19 +16,19 @@ Use the checked-in virtual environment for local commands:
 
 ```bash
 virtual_env/bin/python -m pytest
-virtual_env/bin/python -m src.cli configs/online_shopping_example.toml
+virtual_env/bin/python -m src.cli src/configs/online_shopping_example.toml
 ```
 
 If the package is installed, the console script is also available:
 
 ```bash
-tabular-ml-run configs/online_shopping_example.toml
+tabular-ml-run src/configs/online_shopping_example.toml
 ```
 
 Adapting To A New Dataset
 -------------------------
 
-Copy `configs/online_shopping_example.toml` and edit these sections:
+Copy `src/configs/online_shopping_example.toml` and edit these sections:
 
 - `[data]`: choose `csv`, `parquet`, `sqlite_table`, or `sqlite_query`.
 - `[pipeline]`: set `target_column`, `task`, split options, `save_dir`, and optional `estimator_names`.

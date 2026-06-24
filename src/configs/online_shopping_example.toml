@@ -1,6 +1,6 @@
 [data]
 kind = "sqlite_table"
-path = "../data/online_shopping.db"
+path = "../../data/online_shopping.db"
 table_name = "online_shopping"
 
 [pipeline]
@@ -9,7 +9,7 @@ task = "classification"
 test_size = 0.2
 stratify = true
 random_state = 128
-save_dir = "../runs/online_shopping"
+save_dir = "../../runs/online_shopping"
 estimator_names = ["dummy", "logistic_regression", "random_forest"]
 
 [columns]
