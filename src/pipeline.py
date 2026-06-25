@@ -33,11 +33,13 @@ from sklearn.model_selection import (
     KFold,
     StratifiedKFold,
     GroupKFold,
+    GroupShuffleSplit,
     TimeSeriesSplit,
     cross_validate,
     GridSearchCV,
     RandomizedSearchCV,
 )
+from sklearn.pipeline import Pipeline
 
 from src.config import RANDOM_STATE, ValidationConfig, SearchConfig
 from src.data import split_features_target, train_test_split_dataframe
@@ -75,6 +77,7 @@ class PipelineResult:
     imputation_reconstruction_error: pd.DataFrame | None = None
     vif: pd.DataFrame | None = None
     mutual_information: pd.DataFrame | None = None
+    feature_selection_reports: dict[str, pd.DataFrame] | None = None
     group_breakdowns: dict[str, dict[str, pd.DataFrame]] | None = None
     fairness_metrics: dict[str, dict[str, dict[str, float]]] | None = None
 
@@ -107,6 +110,8 @@ def _build_cv_splitter(
         return GroupKFold(n_splits=n_splits)
     elif method == "time_series_split":
         return TimeSeriesSplit(n_splits=n_splits)
+    elif method == "expanding_window":
+        return TimeSeriesSplit(n_splits=n_splits)
     raise ValueError(f"Unknown validation method: {method}")
 
 
@@ -138,6 +143,7 @@ def train_and_search_models(
             x_train,
             config=config,
             feature_pipeline=feature_pipeline,
+            task=task,
         )
 
         # Check if parameter search parameters are specified for this estimator
@@ -294,10 +300,7 @@ def run_pipeline(
         Fitted models, holdout metrics, train/test split data, optional
         cross-validation metrics, artifact paths, and run metadata.
     """
-    if positive_label is not None:
-        if pos_label is not None:
-            raise ValueError("Cannot specify both pos_label and positive_label.")
-        pos_label = positive_label
+    pos_label = _resolve_pos_label(pos_label, positive_label)
     if cv_folds < 0:
         raise ValueError("cv_folds must be greater than or equal to 0.")
     if cv_folds == 1:
@@ -381,42 +384,13 @@ def run_pipeline(
 
     # 2. Split ────────────────────────────────────────────────────────
     # Split first to prevent selection bias and run baseline CV only on train_df
-    if validation.method == "time_series_split":
-        logger.info("Performing temporal train/test split (test_size=%.2f)…", validation.test_size)
-        split_idx = int(len(dataframe) * (1.0 - validation.test_size))
-        if split_idx <= 0 or split_idx >= len(dataframe):
-            train_df = dataframe.iloc[:split_idx]
-            test_df = dataframe.iloc[split_idx:]
-        else:
-            cutoff_time = dataframe[validation.time_column].iloc[split_idx]
-            train_mask = dataframe[validation.time_column] < cutoff_time
-            train_df = dataframe[train_mask]
-            test_df = dataframe[~train_mask]
-            if train_df.empty or test_df.empty:
-                train_df = dataframe.iloc[:split_idx]
-                test_df = dataframe.iloc[split_idx:]
-        x_train, y_train = split_features_target(train_df, target_column)
-        x_test, y_test = split_features_target(test_df, target_column)
-    elif validation.method == "group_kfold":
-        logger.info("Performing group-aware train/test split (test_size=%.2f, group_column=%s)…", validation.test_size, validation.groups_column)
-        from sklearn.model_selection import GroupShuffleSplit
-        gss = GroupShuffleSplit(n_splits=1, test_size=validation.test_size, random_state=random_state)
-        train_idx, test_idx = next(gss.split(dataframe, groups=dataframe[validation.groups_column]))
-        train_df = dataframe.iloc[train_idx]
-        test_df = dataframe.iloc[test_idx]
-        x_train, y_train = split_features_target(train_df, target_column)
-        x_test, y_test = split_features_target(test_df, target_column)
-    else:
-        logger.info("Splitting data (test_size=%.2f, stratify=%s)…", validation.test_size, stratify)
-        x_train, x_test, y_train, y_test = train_test_split_dataframe(
-            dataframe,
-            target_column,
-            test_size=validation.test_size,
-            random_state=random_state,
-            stratify=stratify if validation.method in {"stratified_kfold", "holdout"} else False,
-        )
-        train_df = dataframe.loc[x_train.index]
-        test_df = dataframe.loc[x_test.index]
+    train_df, test_df, x_train, x_test, y_train, y_test = _split_dataframe(
+        dataframe,
+        validation=validation,
+        target_column=target_column,
+        stratify=stratify,
+        random_state=random_state,
+    )
 
     # 3. Cross-validate (optional) on train_df strictly ────────────────
     cv_summary = None
@@ -441,6 +415,9 @@ def run_pipeline(
             random_state=random_state,
             estimators=estimators,
             feature_pipeline=feature_pipeline,
+            # run_pipeline pre-sorts by time_column at line 353; skip the redundant
+            # O(n) monotonicity scan and copy inside cross_validate_baseline_models.
+            _already_sorted=validation.time_column is not None,
         )
         logger.info("Cross-validation results:\n%s", cv_summary)
 
@@ -468,52 +445,18 @@ def run_pipeline(
         x_test = x_test.drop(columns=[col for col in cols_to_drop if col in x_test.columns])
 
     # 3.5 Calculate Diagnostics before modeling ──────────────────────
-    vif_df = None
-    numeric_cols_for_vif = list(x_train.select_dtypes(include=[np.number]).columns)
-    if len(numeric_cols_for_vif) >= 2:
-        try:
-            vif_df = variance_inflation_factors(x_train, columns=numeric_cols_for_vif)
-        except Exception as e:
-            logger.warning("Could not calculate Variance Inflation Factors: %s", e)
-    else:
-        logger.warning("Fewer than 2 numeric columns in training set; skipping VIF calculation.")
-
-    mi_df = None
-    try:
-        mi_df = mutual_information_scores(x_train, y_train, task=task, random_state=random_state)
-    except Exception as e:
-        logger.warning("Could not calculate Mutual Information scores: %s", e)
-
-    imputation_reconstruction_df = None
-    if config.feature_columns.numeric:
-        try:
-            imputation_reconstruction_df = imputation_reconstruction_error(
-                train_df,
-                config,
-                random_state=random_state,
-            )
-        except Exception as e:
-            logger.warning("Could not calculate imputation reconstruction error: %s", e)
+    vif_df, mi_df, imputation_reconstruction_df = _compute_diagnostics(
+        x_train=x_train,
+        train_df=train_df,
+        y_train=y_train,
+        config=config,
+        task=task,
+        random_state=random_state,
+    )
 
     # Find all cohort columns present in the input dataframe
-    potential_cohort_cols = []
-    if validation.groups_column is not None:
-        potential_cohort_cols.append(validation.groups_column)
-    if hasattr(config, "stratified_categorical_group_cols") and config.stratified_categorical_group_cols:
-        potential_cohort_cols.extend(config.stratified_categorical_group_cols)
-    if hasattr(config, "stratified_numeric_group_cols") and config.stratified_numeric_group_cols:
-        potential_cohort_cols.extend(config.stratified_numeric_group_cols)
-    if hasattr(config, "stratified_fallback_group_col") and config.stratified_fallback_group_col:
-        potential_cohort_cols.append(config.stratified_fallback_group_col)
-
-    seen = set()
-    cohort_cols = []
-    for col in potential_cohort_cols:
-        if col in dataframe.columns and col not in seen:
-            seen.add(col)
-            cohort_cols.append(col)
-
-    groups_test_val = None
+    cohort_cols = _collect_cohort_columns(config, validation, dataframe)
+    groups_test_val: pd.DataFrame | pd.Series | None = None
     if cohort_cols:
         if len(cohort_cols) == 1:
             groups_test_val = test_df[cohort_cols[0]]
@@ -536,6 +479,7 @@ def run_pipeline(
     )
     if search_metadata:
         run_metadata["search_results"] = search_metadata
+    feature_selection_reports = _collect_feature_selection_reports(models)
 
     # 5. Evaluate ─────────────────────────────────────────────────────
     logger.info("Evaluating %d models…", len(models))
@@ -560,6 +504,11 @@ def run_pipeline(
             if artifact_base_path is not None and task == "classification"
             else None
         ),
+        per_class_metrics_dir=(
+            "metrics/per_class_metrics"
+            if artifact_base_path is not None and task == "classification"
+            else None
+        ),
         group_metrics_dir=(
             "metrics/group_metrics"
             if artifact_base_path is not None and groups_test_val is not None
@@ -577,91 +526,24 @@ def run_pipeline(
     logger.info("Results:\n%s", comparison)
 
     # 6. Save (optional) ──────────────────────────────────────────────
-    artifact_paths: dict[str, Path] = {}
-    if artifact_base_path is not None:
-        for name, model in models.items():
-            path = save_model(model, f"models/{name}.joblib", base_path=artifact_base_path)
-            artifact_paths[f"model:{name}"] = path
-            logger.info("Saved %s → %s", name, path)
-        artifact_paths["metrics"] = save_dataframe(
-            comparison,
-            "metrics/model_comparison.csv",
-            base_path=artifact_base_path,
-        )
-        if vif_df is not None:
-            artifact_paths["vif"] = save_dataframe(
-                vif_df,
-                "metrics/vif.csv",
-                base_path=artifact_base_path,
-            )
-        if mi_df is not None:
-            artifact_paths["mutual_information"] = save_dataframe(
-                mi_df,
-                "metrics/mutual_information.csv",
-                base_path=artifact_base_path,
-            )
-        if imputation_reconstruction_df is not None:
-            artifact_paths["imputation_reconstruction_error"] = save_dataframe(
-                imputation_reconstruction_df,
-                "metrics/imputation_reconstruction_error.csv",
-                base_path=artifact_base_path,
-            )
-        for name in models:
-            if permutation_importances and name in permutation_importances:
-                artifact_paths[f"permutation_importances:{name}"] = (
-                    artifact_base_path / "metrics" / "permutation_importances" / f"{name}.csv"
-                )
-            if group_breakdowns and name in group_breakdowns:
-                for cohort in group_breakdowns[name]:
-                    if isinstance(groups_test_val, pd.DataFrame):
-                        artifact_paths[f"group_breakdown:{name}:{cohort}"] = (
-                            artifact_base_path / "metrics" / "group_metrics" / name / cohort / "breakdown.csv"
-                        )
-                        if task == "classification":
-                            artifact_paths[f"fairness_metrics:{name}:{cohort}"] = (
-                                artifact_base_path / "metrics" / "group_metrics" / name / cohort / "fairness.json"
-                            )
-                    else:
-                        artifact_paths[f"group_breakdown:{name}:{cohort}"] = (
-                            artifact_base_path / "metrics" / "group_metrics" / name / "breakdown.csv"
-                        )
-                        if task == "classification":
-                            artifact_paths[f"fairness_metrics:{name}:{cohort}"] = (
-                                artifact_base_path / "metrics" / "group_metrics" / name / "fairness.json"
-                            )
-
-        if cv_summary is not None:
-            # Backward compatibility key cv_metrics -> metrics/cross_validation.csv
-            artifact_paths["cv_metrics"] = save_dataframe(
-                cv_summary,
-                "metrics/cross_validation.csv",
-                base_path=artifact_base_path,
-            )
-            # New fold-level metrics
-            if cv_folds_df is not None:
-                artifact_paths["cv_folds_metrics"] = save_dataframe(
-                    cv_folds_df,
-                    "metrics/cross_validation_folds.csv",
-                    base_path=artifact_base_path,
-                )
-        # Save search results if search was run
-        for name, search_df in search_cv_results.items():
-            artifact_paths[f"search_cv_results:{name}"] = save_dataframe(
-                search_df,
-                f"metrics/search/{name}_cv_results.csv",
-                base_path=artifact_base_path,
-            )
-        artifact_paths["metadata"] = save_json(
-            run_metadata,
-            "metadata/run_metadata.json",
-            base_path=artifact_base_path,
-        )
-        if run_config is not None:
-            artifact_paths["config"] = save_json(
-                dict(run_config),
-                "metadata/run_config.json",
-                base_path=artifact_base_path,
-            )
+    artifact_paths = _save_artifacts(
+        artifact_base_path=artifact_base_path,
+        models=models,
+        comparison=comparison,
+        vif_df=vif_df,
+        mi_df=mi_df,
+        imputation_reconstruction_df=imputation_reconstruction_df,
+        permutation_importances=permutation_importances,
+        feature_selection_reports=feature_selection_reports,
+        group_breakdowns=group_breakdowns,
+        groups_test_val=groups_test_val,
+        task=task,
+        cv_summary=cv_summary,
+        cv_folds_df=cv_folds_df,
+        search_cv_results=search_cv_results,
+        run_metadata=run_metadata,
+        run_config=run_config,
+    )
 
     return PipelineResult(
         models=models,
@@ -678,9 +560,413 @@ def run_pipeline(
         imputation_reconstruction_error=imputation_reconstruction_df,
         vif=vif_df,
         mutual_information=mi_df,
+        feature_selection_reports=feature_selection_reports or None,
         group_breakdowns=group_breakdowns or None,
         fairness_metrics=fairness_metrics_dict or None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Private helpers extracted from run_pipeline
+# ---------------------------------------------------------------------------
+
+
+def _resolve_pos_label(pos_label: Any, positive_label: Any) -> Any:
+    """Resolve the ``positive_label`` alias into ``pos_label``.
+
+    Raises ``ValueError`` when both are provided simultaneously.
+    """
+    if positive_label is not None:
+        if pos_label is not None:
+            raise ValueError("Cannot specify both pos_label and positive_label.")
+        return positive_label
+    return pos_label
+
+
+def _split_dataframe(
+    dataframe: pd.DataFrame,
+    *,
+    validation: Any,
+    target_column: str,
+    stratify: bool,
+    random_state: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+    """Split *dataframe* into train/test sets according to *validation* method.
+
+    Returns
+    -------
+    train_df, test_df, x_train, x_test, y_train, y_test
+    """
+    if validation.method in {"time_series_split", "expanding_window"}:
+        logger.info(
+            "Performing temporal train/test split (test_size=%.2f)…",
+            validation.test_size,
+        )
+        split_idx = int(len(dataframe) * (1.0 - validation.test_size))
+        if split_idx <= 0 or split_idx >= len(dataframe):
+            train_df = dataframe.iloc[:split_idx]
+            test_df = dataframe.iloc[split_idx:]
+        else:
+            cutoff_time = dataframe[validation.time_column].iloc[split_idx]
+            train_mask = dataframe[validation.time_column] < cutoff_time
+            train_df = dataframe[train_mask]
+            test_df = dataframe[~train_mask]
+            if train_df.empty or test_df.empty:
+                train_df = dataframe.iloc[:split_idx]
+                test_df = dataframe.iloc[split_idx:]
+        x_train, y_train = split_features_target(train_df, target_column)
+        x_test, y_test = split_features_target(test_df, target_column)
+    elif validation.method == "group_kfold":
+        logger.info(
+            "Performing group-aware train/test split (test_size=%.2f, group_column=%s)…",
+            validation.test_size,
+            validation.groups_column,
+        )
+        gss = GroupShuffleSplit(
+            n_splits=1, test_size=validation.test_size, random_state=random_state
+        )
+        train_idx, test_idx = next(
+            gss.split(dataframe, groups=dataframe[validation.groups_column])
+        )
+        train_df = dataframe.iloc[train_idx]
+        test_df = dataframe.iloc[test_idx]
+        x_train, y_train = split_features_target(train_df, target_column)
+        x_test, y_test = split_features_target(test_df, target_column)
+    else:
+        logger.info(
+            "Splitting data (test_size=%.2f, stratify=%s)…",
+            validation.test_size,
+            stratify,
+        )
+        x_train, x_test, y_train, y_test = train_test_split_dataframe(
+            dataframe,
+            target_column,
+            test_size=validation.test_size,
+            random_state=random_state,
+            stratify=stratify if validation.method in {"stratified_kfold", "holdout"} else False,
+        )
+        train_df = dataframe.loc[x_train.index]
+        test_df = dataframe.loc[x_test.index]
+    return train_df, test_df, x_train, x_test, y_train, y_test
+
+
+def _compute_diagnostics(
+    *,
+    x_train: pd.DataFrame,
+    train_df: pd.DataFrame,
+    y_train: pd.Series,
+    config: "PreprocessingConfig",
+    task: "TaskType",
+    random_state: int,
+) -> tuple["pd.DataFrame | None", "pd.DataFrame | None", "pd.DataFrame | None"]:
+    """Compute VIF, mutual information, and imputation reconstruction error.
+
+    Returns
+    -------
+    vif_df, mi_df, imputation_reconstruction_df
+    """
+    vif_df = None
+    numeric_cols_for_vif = list(x_train.select_dtypes(include=[np.number]).columns)
+    if len(numeric_cols_for_vif) >= 2:
+        try:
+            vif_df = variance_inflation_factors(x_train, columns=numeric_cols_for_vif)
+        except Exception as e:
+            logger.warning("Could not calculate Variance Inflation Factors: %s", e)
+    else:
+        logger.warning(
+            "Fewer than 2 numeric columns in training set; skipping VIF calculation."
+        )
+
+    mi_df = None
+    try:
+        mi_df = mutual_information_scores(
+            x_train, y_train, task=task, random_state=random_state
+        )
+    except Exception as e:
+        logger.warning("Could not calculate Mutual Information scores: %s", e)
+
+    imputation_reconstruction_df = None
+    if config.feature_columns.numeric:
+        try:
+            imputation_reconstruction_df = imputation_reconstruction_error(
+                train_df,
+                config,
+                random_state=random_state,
+            )
+        except Exception as e:
+            logger.warning(
+                "Could not calculate imputation reconstruction error: %s", e
+            )
+
+    return vif_df, mi_df, imputation_reconstruction_df
+
+
+def _collect_cohort_columns(
+    config: "PreprocessingConfig",
+    validation: Any,
+    dataframe: pd.DataFrame,
+) -> list[str]:
+    """Return deduplicated cohort column names that actually exist in *dataframe*."""
+    potential: list[str] = []
+    if validation.groups_column is not None:
+        potential.append(validation.groups_column)
+    if hasattr(config, "stratified_categorical_group_cols") and config.stratified_categorical_group_cols:
+        potential.extend(config.stratified_categorical_group_cols)
+    if hasattr(config, "stratified_numeric_group_cols") and config.stratified_numeric_group_cols:
+        potential.extend(config.stratified_numeric_group_cols)
+    if hasattr(config, "stratified_fallback_group_col") and config.stratified_fallback_group_col:
+        potential.append(config.stratified_fallback_group_col)
+
+    seen: set[str] = set()
+    cohort_cols: list[str] = []
+    for col in potential:
+        if col in dataframe.columns and col not in seen:
+            seen.add(col)
+            cohort_cols.append(col)
+    return cohort_cols
+
+
+def _collect_feature_selection_reports(
+    models: Mapping[str, BaseEstimator],
+) -> dict[str, pd.DataFrame]:
+    reports: dict[str, pd.DataFrame] = {}
+    for name, model in models.items():
+        report = _feature_selection_report_for_model(model)
+        if report is not None and not report.empty:
+            reports[name] = report
+    return reports
+
+
+def _feature_selection_report_for_model(model: BaseEstimator) -> pd.DataFrame | None:
+    if not isinstance(model, Pipeline):
+        return None
+
+    rows: list[dict[str, Any]] = []
+    feature_names: np.ndarray | None = None
+    for step_name, step in model.steps:
+        if step_name == "model":
+            break
+
+        if _looks_like_selector(step_name, step):
+            rows.extend(
+                _feature_selection_rows(
+                    step_name=step_name,
+                    selector=step,
+                    input_features=feature_names,
+                )
+            )
+
+        feature_names = _feature_names_after_step(step, feature_names)
+
+    if not rows:
+        return None
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "input_feature",
+            "selected",
+            "score",
+            "rank",
+            "threshold",
+            "selection_step",
+        ],
+    )
+
+
+def _looks_like_selector(step_name: str, step: Any) -> bool:
+    return step_name.startswith("feature_selection_") and hasattr(step, "get_support")
+
+
+def _feature_selection_rows(
+    *,
+    step_name: str,
+    selector: Any,
+    input_features: np.ndarray | None,
+) -> list[dict[str, Any]]:
+    support = np.asarray(selector.get_support(), dtype=bool)
+    if input_features is None or len(input_features) != len(support):
+        names = np.asarray([f"feature_{idx}" for idx in range(len(support))], dtype=object)
+    else:
+        names = np.asarray(input_features, dtype=object)
+
+    scores = _selector_scores(selector, len(support))
+    ranks = _score_ranks(scores)
+    threshold = getattr(selector, "selection_threshold_", None)
+    return [
+        {
+            "input_feature": str(names[idx]),
+            "selected": bool(support[idx]),
+            "score": _finite_or_nan(scores[idx]),
+            "rank": _rank_or_nan(ranks[idx]),
+            "threshold": threshold,
+            "selection_step": step_name,
+        }
+        for idx in range(len(support))
+    ]
+
+
+def _feature_names_after_step(
+    step: Any,
+    input_features: np.ndarray | None,
+) -> np.ndarray | None:
+    if hasattr(step, "get_feature_names_out"):
+        try:
+            if input_features is None:
+                return np.asarray(step.get_feature_names_out(), dtype=object)
+            return np.asarray(step.get_feature_names_out(input_features), dtype=object)
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+    if input_features is not None and hasattr(step, "get_support"):
+        try:
+            return input_features[np.asarray(step.get_support(), dtype=bool)]
+        except (AttributeError, ValueError, IndexError):
+            pass
+    return None
+
+
+def _selector_scores(selector: Any, n_features: int) -> np.ndarray:
+    for attribute in ("scores_", "vif_scores_"):
+        values = getattr(selector, attribute, None)
+        if values is not None:
+            scores = np.asarray(values, dtype=float)
+            if len(scores) == n_features:
+                return scores
+    return np.full(n_features, np.nan, dtype=float)
+
+
+def _score_ranks(scores: np.ndarray) -> np.ndarray:
+    ranks = np.full(len(scores), np.nan, dtype=float)
+    valid = ~np.isnan(scores)
+    if not valid.any():
+        return ranks
+    sortable = np.where(valid, scores, -np.inf)
+    order = np.argsort(-sortable, kind="mergesort")
+    current_rank = 1
+    for idx in order:
+        if not valid[idx]:
+            continue
+        ranks[idx] = current_rank
+        current_rank += 1
+    return ranks
+
+
+def _finite_or_nan(value: float) -> float:
+    return float(value) if not np.isnan(value) else float("nan")
+
+
+def _rank_or_nan(value: float) -> int | float:
+    return int(value) if np.isfinite(value) else float("nan")
+
+
+def _save_artifacts(
+    *,
+    artifact_base_path: Path | None,
+    models: dict,
+    comparison: pd.DataFrame,
+    vif_df: pd.DataFrame | None,
+    mi_df: pd.DataFrame | None,
+    imputation_reconstruction_df: pd.DataFrame | None,
+    permutation_importances: dict,
+    feature_selection_reports: dict[str, pd.DataFrame],
+    group_breakdowns: dict,
+    groups_test_val: pd.DataFrame | pd.Series | None,
+    task: str,
+    cv_summary: pd.DataFrame | None,
+    cv_folds_df: pd.DataFrame | None,
+    search_cv_results: dict,
+    run_metadata: dict,
+    run_config: Any,
+) -> dict[str, Path]:
+    """Persist all pipeline artefacts and return a ``{key: path}`` mapping.
+
+    Returns an empty dict immediately when *artifact_base_path* is ``None``.
+    """
+    artifact_paths: dict[str, Path] = {}
+    if artifact_base_path is None:
+        return artifact_paths
+
+    for name, model in models.items():
+        path = save_model(model, f"models/{name}.joblib", base_path=artifact_base_path)
+        artifact_paths[f"model:{name}"] = path
+        logger.info("Saved %s → %s", name, path)
+
+    artifact_paths["metrics"] = save_dataframe(
+        comparison, "metrics/model_comparison.csv", base_path=artifact_base_path
+    )
+    if vif_df is not None:
+        artifact_paths["vif"] = save_dataframe(
+            vif_df, "metrics/vif.csv", base_path=artifact_base_path
+        )
+    if mi_df is not None:
+        artifact_paths["mutual_information"] = save_dataframe(
+            mi_df, "metrics/mutual_information.csv", base_path=artifact_base_path
+        )
+    if imputation_reconstruction_df is not None:
+        artifact_paths["imputation_reconstruction_error"] = save_dataframe(
+            imputation_reconstruction_df,
+            "metrics/imputation_reconstruction_error.csv",
+            base_path=artifact_base_path,
+        )
+
+    for name in models:
+        if feature_selection_reports and name in feature_selection_reports:
+            artifact_paths[f"feature_selection:{name}"] = save_dataframe(
+                feature_selection_reports[name],
+                f"metrics/feature_selection/{name}.csv",
+                base_path=artifact_base_path,
+            )
+        if permutation_importances and name in permutation_importances:
+            artifact_paths[f"permutation_importances:{name}"] = (
+                artifact_base_path / "metrics" / "permutation_importances" / f"{name}.csv"
+            )
+        if group_breakdowns and name in group_breakdowns:
+            for cohort in group_breakdowns[name]:
+                if isinstance(groups_test_val, pd.DataFrame):
+                    artifact_paths[f"group_breakdown:{name}:{cohort}"] = (
+                        artifact_base_path / "metrics" / "group_metrics" / name / cohort / "breakdown.csv"
+                    )
+                    if task == "classification":
+                        artifact_paths[f"fairness_metrics:{name}:{cohort}"] = (
+                            artifact_base_path / "metrics" / "group_metrics" / name / cohort / "fairness.json"
+                        )
+                else:
+                    artifact_paths[f"group_breakdown:{name}:{cohort}"] = (
+                        artifact_base_path / "metrics" / "group_metrics" / name / "breakdown.csv"
+                    )
+                    if task == "classification":
+                        artifact_paths[f"fairness_metrics:{name}:{cohort}"] = (
+                            artifact_base_path / "metrics" / "group_metrics" / name / "fairness.json"
+                        )
+
+    if cv_summary is not None:
+        artifact_paths["cv_metrics"] = save_dataframe(
+            cv_summary,
+            "metrics/cross_validation.csv",
+            base_path=artifact_base_path,
+        )
+        if cv_folds_df is not None:
+            artifact_paths["cv_folds_metrics"] = save_dataframe(
+                cv_folds_df,
+                "metrics/cross_validation_folds.csv",
+                base_path=artifact_base_path,
+            )
+
+    for name, search_df in search_cv_results.items():
+        artifact_paths[f"search_cv_results:{name}"] = save_dataframe(
+            search_df,
+            f"metrics/search/{name}_cv_results.csv",
+            base_path=artifact_base_path,
+        )
+
+    artifact_paths["metadata"] = save_json(
+        run_metadata, "metadata/run_metadata.json", base_path=artifact_base_path
+    )
+    if run_config is not None:
+        artifact_paths["config"] = save_json(
+            dict(run_config), "metadata/run_config.json", base_path=artifact_base_path
+        )
+    return artifact_paths
 
 
 def cross_validate_baseline_models(
@@ -693,9 +979,12 @@ def cross_validate_baseline_models(
     random_state: int = RANDOM_STATE,
     estimators: Mapping[str, BaseEstimator] | None = None,
     feature_pipeline: FeaturePipeline | None = None,
+    _already_sorted: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    # Time-series temporal sorting
-    if validation.time_column is not None:
+    # Time-series temporal sorting.
+    # Skip when the caller (e.g. run_pipeline) guarantees the frame is pre-sorted,
+    # avoiding a redundant O(n) monotonicity scan and defensive copy.
+    if validation.time_column is not None and not _already_sorted:
         if not dataframe[validation.time_column].is_monotonic_increasing:
             dataframe = dataframe.sort_values(by=validation.time_column).copy()
 
@@ -727,6 +1016,7 @@ def cross_validate_baseline_models(
             features,
             config=config,
             feature_pipeline=feature_pipeline,
+            task=task,
         )
         scores = cross_validate(
             model,

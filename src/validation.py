@@ -413,7 +413,7 @@ def validate_pipeline_and_search_configs(
     feature_columns: Any,
 ) -> None:
     # 1. Validation method checks
-    VALID_VALIDATION_METHODS = {"holdout", "kfold", "stratified_kfold", "group_kfold", "time_series_split"}
+    VALID_VALIDATION_METHODS = {"holdout", "kfold", "stratified_kfold", "group_kfold", "time_series_split", "expanding_window"}
     if validation.method not in VALID_VALIDATION_METHODS:
         raise ConfigurationError(
             f"validation.method must be one of {sorted(VALID_VALIDATION_METHODS)}, got '{validation.method}'."
@@ -430,6 +430,8 @@ def validate_pipeline_and_search_configs(
         raise ConfigurationError("validation.groups_column is required when validation.method is 'group_kfold'.")
     if validation.method == "time_series_split" and validation.time_column is None:
         raise ConfigurationError("validation.time_column is required when validation.method is 'time_series_split'.")
+    if validation.method == "expanding_window" and validation.time_column is None:
+        raise ConfigurationError("validation.time_column is required when validation.method is 'expanding_window'.")
 
     # 4. Stratified kfold + regression prevention
     if validation.method == "stratified_kfold" and task == "regression":
@@ -476,6 +478,19 @@ def validate_pipeline_and_search_configs(
             raise ConfigurationError(f"search.n_iter must be at least 1, got {search.n_iter}.")
         if search.refit is False:
             raise ConfigurationError("search.refit=False is not supported because the pipeline requires a fitted model to evaluate on the holdout split.")
+        if validation.method == "holdout":
+            warnings.warn(
+                f"validation.method='holdout' is combined with an active hyperparameter search "
+                f"(search.method='{search.method}'). "
+                f"In this configuration, validation.n_splits={validation.n_splits} controls the "
+                f"number of cross-validation folds used *inside* the search object "
+                f"(GridSearchCV/RandomizedSearchCV), not the outer holdout split. "
+                f"The outer train/test boundary is determined solely by validation.test_size="
+                f"{validation.test_size}. Set validation.method to 'kfold' or 'stratified_kfold' "
+                f"to run a consistent cross-validation for both baseline evaluation and search.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         if isinstance(search.scoring, dict):
             if isinstance(search.refit, bool):

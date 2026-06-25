@@ -5,6 +5,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 
@@ -212,7 +213,200 @@ class SklearnFeaturePipeline(BaseEstimator, TransformerMixin):
         self.feature_pipeline = feature_pipeline
 
     def fit(self, X: pd.DataFrame, y: Any = None) -> SklearnFeaturePipeline:
+        if hasattr(X, "columns"):
+            self.feature_names_in_ = np.asarray(X.columns, dtype=object)
+        else:
+            self.feature_names_in_ = np.asarray(
+                [f"x{i}" for i in range(X.shape[1])],
+                dtype=object,
+            )
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
         return self.feature_pipeline.transform(X)
+
+    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+        if input_features is None:
+            input_features = self.feature_names_in_
+        return np.asarray(
+            [*input_features, *self.feature_pipeline.output_columns],
+            dtype=object,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Time-series-aware feature classes
+# ---------------------------------------------------------------------------
+
+
+class LagFeature(Feature):
+    """Shift a single source column by ``lag`` rows.
+
+    The frame **must** be sorted by time before this feature is applied.
+    Produces NaN in the first ``lag`` rows.
+
+    Parameters
+    ----------
+    name : str
+        Output column name.
+    source : str
+        Name of the source column to lag.
+    lag : int
+        Number of rows to shift (must be >= 1).
+    role : FeatureRole, default "numeric"
+        Role assigned to the output column in the feature registry.
+
+    Raises
+    ------
+    ValueError
+        If ``lag < 1`` at construction time, or if the frame has fewer than
+        ``lag + 1`` rows at transform time (all outputs would be NaN, which
+        almost certainly indicates a pipeline misconfiguration such as requesting
+        a 30-day lag from a 10-row dataset).
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        source: str,
+        lag: int,
+        role: FeatureRole = "numeric",
+    ) -> None:
+        super().__init__(name=name, requires=[source], role=role)
+        if lag < 1:
+            raise ValueError(f"LagFeature lag must be >= 1, got {lag}.")
+        self.source = source
+        self.lag = lag
+
+    def _transform(self, frame: pd.DataFrame) -> pd.Series:
+        if len(frame) <= self.lag:
+            raise ValueError(
+                f"LagFeature '{self.name}': frame has {len(frame)} row(s) but "
+                f"lag={self.lag} requires at least {self.lag + 1} rows to produce "
+                f"any non-NaN output. This usually indicates a pipeline "
+                f"misconfiguration (e.g. too large a lag for the dataset size)."
+            )
+        return frame[self.source].shift(self.lag).rename(self.name)
+
+
+class RollingMeanFeature(Feature):
+    """Rolling window mean of a single source column.
+
+    The frame **must** be sorted by time before this feature is applied.
+    Produces NaN in the first ``window - 1`` rows.
+
+    Parameters
+    ----------
+    name : str
+        Output column name.
+    source : str
+        Name of the source column.
+    window : int
+        Rolling window size (must be >= 2).
+    role : FeatureRole, default "numeric"
+
+    Raises
+    ------
+    ValueError
+        If ``window < 2`` at construction time, or if the frame has fewer
+        rows than ``window`` at transform time.
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        source: str,
+        window: int,
+        role: FeatureRole = "numeric",
+    ) -> None:
+        super().__init__(name=name, requires=[source], role=role)
+        if window < 2:
+            raise ValueError(f"RollingMeanFeature window must be >= 2, got {window}.")
+        self.source = source
+        self.window = window
+
+    def _transform(self, frame: pd.DataFrame) -> pd.Series:
+        if len(frame) < self.window:
+            raise ValueError(
+                f"RollingMeanFeature '{self.name}': frame has {len(frame)} row(s) "
+                f"but window={self.window} requires at least {self.window} rows."
+            )
+        return frame[self.source].rolling(self.window).mean().rename(self.name)
+
+
+class RollingStdFeature(Feature):
+    """Rolling window standard deviation of a single source column.
+
+    The frame **must** be sorted by time before this feature is applied.
+    Produces NaN in the first ``window - 1`` rows.
+
+    Parameters
+    ----------
+    name : str
+        Output column name.
+    source : str
+        Name of the source column.
+    window : int
+        Rolling window size (must be >= 2).
+    role : FeatureRole, default "numeric"
+
+    Raises
+    ------
+    ValueError
+        If ``window < 2`` at construction time, or if the frame has fewer
+        rows than ``window`` at transform time.
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        source: str,
+        window: int,
+        role: FeatureRole = "numeric",
+    ) -> None:
+        super().__init__(name=name, requires=[source], role=role)
+        if window < 2:
+            raise ValueError(f"RollingStdFeature window must be >= 2, got {window}.")
+        self.source = source
+        self.window = window
+
+    def _transform(self, frame: pd.DataFrame) -> pd.Series:
+        if len(frame) < self.window:
+            raise ValueError(
+                f"RollingStdFeature '{self.name}': frame has {len(frame)} row(s) "
+                f"but window={self.window} requires at least {self.window} rows."
+            )
+        return frame[self.source].rolling(self.window).std().rename(self.name)
+
+
+class ExpandingMeanFeature(Feature):
+    """Expanding (cumulative) mean of a single source column.
+
+    The frame **must** be sorted by time before this feature is applied.
+    The first row will be equal to the source column's own value (expanding
+    mean of one element).
+
+    Parameters
+    ----------
+    name : str
+        Output column name.
+    source : str
+        Name of the source column.
+    role : FeatureRole, default "numeric"
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        source: str,
+        role: FeatureRole = "numeric",
+    ) -> None:
+        super().__init__(name=name, requires=[source], role=role)
+        self.source = source
+
+    def _transform(self, frame: pd.DataFrame) -> pd.Series:
+        return frame[self.source].expanding().mean().rename(self.name)

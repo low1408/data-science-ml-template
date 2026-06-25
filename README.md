@@ -340,6 +340,23 @@ add_simple_missing_indicators = true
 text_max_features = 1000
 ```
 
+Feature selection is disabled by default. Enable it only after comparing
+baseline results, because pruning changes the fitted feature space. Selectors
+run inside the sklearn pipeline after preprocessing, so target-dependent
+selection is fit separately inside cross-validation/search folds.
+
+```toml
+[preprocessing.feature_selection]
+enabled = true
+mi = true
+mi_strategy = "k_best"      # "k_best", "percentile", or "threshold"
+mi_k = 25
+
+vif = true
+vif_threshold = 10.0
+vif_max_features = 200     # VIF densifies the selected matrix and is bounded
+```
+
 Datetime columns are converted into year, month, day, and dayofweek numeric
 features. Text columns are vectorized with per-column TF-IDF using
 `text_max_features` as the maximum vocabulary size per source column.
@@ -378,6 +395,8 @@ When `save_dir` is set, each run writes:
 - `models/*.joblib`: fitted sklearn pipelines.
 - `metrics/model_comparison.csv`: evaluation metrics by model.
 - `metrics/feature_importances/*.csv`: native model importances or coefficients when available.
+- `metrics/feature_selection/*.csv`: selected/dropped preprocessed features
+  when feature selection is enabled.
 - `metrics/permutation_importances/*.csv`: model-agnostic permutation feature importance on the holdout split.
 - `metrics/group_metrics/<model>/breakdown.csv`: per-cohort metrics when `[pipeline.validation].groups_column` is configured.
 - `metrics/group_metrics/<model>/fairness.json`: classification cohort fairness diagnostics when groups are configured.

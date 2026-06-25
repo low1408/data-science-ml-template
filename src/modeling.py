@@ -13,7 +13,15 @@ from sklearn.ensemble import (
 )
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer
-from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.linear_model import (
+    LinearRegression,
+    LogisticRegression,
+    RidgeClassifier,
+    Ridge,
+    Lasso,
+    ElasticNet,
+)
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
 from src.config import RANDOM_STATE
 from src.evaluation import TaskType
@@ -77,6 +85,19 @@ def _optional_classification_estimators() -> dict[str, BaseEstimator]:
             verbose=False,
         )
 
+    try:
+        import torch
+        from src.tabular_transformer import TabularTransformerClassifier, AdvancedTabularTransformerClassifier
+    except Exception:
+        pass
+    else:
+        estimators["tabular_transformer"] = TabularTransformerClassifier(
+            random_state=RANDOM_STATE
+        )
+        estimators["advanced_tabular_transformer"] = AdvancedTabularTransformerClassifier(
+            random_state=RANDOM_STATE
+        )
+
     return estimators
 
 
@@ -114,6 +135,8 @@ ESTIMATOR_REGISTRY: dict[TaskType, Callable[[], dict[str, BaseEstimator]]] = {
     "classification": lambda: {
         "dummy": DummyClassifier(strategy="most_frequent"),
         "logistic_regression": LogisticRegression(max_iter=1000),
+        "ridge": RidgeClassifier(random_state=RANDOM_STATE),
+        "decision_tree": DecisionTreeClassifier(random_state=RANDOM_STATE),
         "random_forest": RandomForestClassifier(random_state=RANDOM_STATE),
         "hist_gradient_boosting": _hist_gradient_boosting_classifier(),
         **_optional_classification_estimators(),
@@ -121,6 +144,10 @@ ESTIMATOR_REGISTRY: dict[TaskType, Callable[[], dict[str, BaseEstimator]]] = {
     "regression": lambda: {
         "dummy": DummyRegressor(strategy="mean"),
         "linear_regression": LinearRegression(),
+        "ridge": Ridge(random_state=RANDOM_STATE),
+        "lasso": Lasso(random_state=RANDOM_STATE),
+        "elastic_net": ElasticNet(random_state=RANDOM_STATE),
+        "decision_tree": DecisionTreeRegressor(random_state=RANDOM_STATE),
         "random_forest": RandomForestRegressor(random_state=RANDOM_STATE),
         "hist_gradient_boosting": _hist_gradient_boosting_regressor(),
         **_optional_regression_estimators(),

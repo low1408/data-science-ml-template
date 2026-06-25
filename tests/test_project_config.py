@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import pandas as pd
+from sklearn.dummy import DummyClassifier
 
 from src.project_config import (
     load_project_config,
     project_config_from_dict,
     run_project_config,
 )
+from src.pipeline import run_pipeline
+from src.preprocessing import FeatureColumns, FeatureSelectionConfig, PreprocessingConfig
 
 
 def test_project_config_from_dict_builds_runtime_objects():
@@ -116,6 +119,71 @@ def test_project_config_loads_optional_transform_settings():
     assert config.preprocessing.rare_category_min_frequency == 0.02
     assert config.preprocessing.frequency_unknown_value == -1.0
     assert config.preprocessing.add_simple_missing_indicators is True
+
+
+def test_project_config_loads_feature_selection_settings():
+    config = project_config_from_dict(
+        {
+            "data": {"kind": "csv", "path": "data.csv"},
+            "pipeline": {
+                "target_column": "target",
+                "task": "classification",
+            },
+            "columns": {
+                "numeric": ["age", "income"],
+                "categorical": ["region"],
+            },
+            "preprocessing": {
+                "feature_selection": {
+                    "enabled": True,
+                    "mi": True,
+                    "mi_strategy": "k_best",
+                    "mi_k": 3,
+                    "vif": True,
+                    "vif_threshold": 7.5,
+                    "vif_max_features": 50,
+                }
+            },
+        }
+    )
+
+    selection = config.preprocessing.feature_selection
+    assert selection.enabled is True
+    assert selection.mutual_information is True
+    assert selection.mi_strategy == "k_best"
+    assert selection.mi_k == 3
+    assert selection.vif is True
+    assert selection.vif_threshold == 7.5
+    assert selection.vif_max_features == 50
+
+
+def test_run_pipeline_saves_feature_selection_report(tmp_path):
+    dataframe = pd.DataFrame(
+        {
+            "signal": [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            "noise": [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            "target": [0, 0, 0, 0, 1, 1, 1, 1],
+        }
+    )
+    result = run_pipeline(
+        dataframe,
+        target_column="target",
+        task="classification",
+        config=PreprocessingConfig(
+            feature_columns=FeatureColumns(numeric=["signal", "noise"], categorical=[]),
+            feature_selection=FeatureSelectionConfig(
+                mutual_information=True,
+                mi_strategy="k_best",
+                mi_k=1,
+            ),
+        ),
+        estimators={"dummy": DummyClassifier()},
+        save_dir=tmp_path,
+    )
+
+    report = result.feature_selection_reports["dummy"]
+    assert report["selected"].sum() == 1
+    assert result.artifact_paths["feature_selection:dummy"].exists()
 
 
 def test_optional_transform_settings_build_expected_preprocessor_shape():

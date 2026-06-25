@@ -12,7 +12,7 @@ from src.data import CSVDataLoader, ParquetDataLoader, SQLiteQueryLoader, SQLite
 from src.evaluation import TaskType
 from src.modeling import baseline_estimators
 from src.pipeline import PipelineResult, run_pipeline
-from src.preprocessing import FeatureColumns, PreprocessingConfig
+from src.preprocessing import FeatureColumns, FeatureSelectionConfig, PreprocessingConfig
 from src.validation import DataSchema, ConfigurationError, validate_pipeline_and_search_configs
 
 
@@ -74,6 +74,7 @@ def project_config_from_dict(
     pipeline_raw = _required_table(raw, "pipeline")
     columns_raw = _required_table(raw, "columns")
     preprocessing_raw = raw.get("preprocessing", {})
+    feature_selection_raw = dict(preprocessing_raw.get("feature_selection", {}))
     schema_raw = raw.get("schema")
 
     data = DataSourceConfig(
@@ -186,6 +187,30 @@ def project_config_from_dict(
 
     preprocessing = PreprocessingConfig(
         feature_columns=feature_columns,
+        feature_selection=FeatureSelectionConfig(
+            enabled=bool(feature_selection_raw.get("enabled", False)),
+            mutual_information=bool(
+                feature_selection_raw.get(
+                    "mutual_information",
+                    feature_selection_raw.get("mi", False),
+                )
+            ),
+            vif=bool(feature_selection_raw.get("vif", False)),
+            mi_strategy=str(feature_selection_raw.get("mi_strategy", "percentile")),
+            mi_k=int(feature_selection_raw.get("mi_k", 20)),
+            mi_percentile=float(feature_selection_raw.get("mi_percentile", 50.0)),
+            mi_threshold=float(feature_selection_raw.get("mi_threshold", 0.0)),
+            mi_min_features=int(feature_selection_raw.get("mi_min_features", 1)),
+            mi_random_state=int(feature_selection_raw.get("mi_random_state", 0)),
+            vif_threshold=float(feature_selection_raw.get("vif_threshold", 10.0)),
+            vif_min_features=int(feature_selection_raw.get("vif_min_features", 1)),
+            vif_max_iter=(
+                int(feature_selection_raw["vif_max_iter"])
+                if feature_selection_raw.get("vif_max_iter") is not None
+                else None
+            ),
+            vif_max_features=int(feature_selection_raw.get("vif_max_features", 200)),
+        ),
         imputer=preprocessing_raw.get("imputer", "simple"),
         scale_numeric=bool(preprocessing_raw.get("scale_numeric", False)),
         numeric_scaler=preprocessing_raw.get("numeric_scaler", "none"),
@@ -258,6 +283,10 @@ def project_config_from_dict(
         add_missing_indicators=bool(
             preprocessing_raw.get("add_missing_indicators", True)
         ),
+        categorical_onehot_max_cardinality=int(
+            preprocessing_raw.get("categorical_onehot_max_cardinality", 10)
+        ),
+        hashing_n_features=int(preprocessing_raw.get("hashing_n_features", 128)),
     )
 
     schema = _build_schema(schema_raw) if schema_raw is not None else None

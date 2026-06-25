@@ -17,12 +17,19 @@ from sklearn.impute import KNNImputer, IterativeImputer, SimpleImputer
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import (
     accuracy_score,
+    average_precision_score,
+    balanced_accuracy_score,
+    brier_score_loss,
     confusion_matrix,
+    explained_variance_score,
     f1_score,
+    log_loss as sklearn_log_loss,
     mean_absolute_error,
     mean_absolute_percentage_error,
     mean_squared_error,
     matthews_corrcoef,
+    median_absolute_error as sklearn_median_absolute_error,
+    precision_recall_fscore_support,
     precision_score,
     r2_score,
     recall_score,
@@ -67,29 +74,30 @@ def classification_metrics(
     dict[str, float]
         Dictionary of metrics.
     """
-    metrics = {
-        "accuracy": accuracy_score(y_true, y_pred),
-        "precision": precision_score(y_true, y_pred, average="weighted", zero_division=0),
-        "recall": recall_score(y_true, y_pred, average="weighted", zero_division=0),
-        "f1": f1_score(y_true, y_pred, average="weighted", zero_division=0),
-        "mcc": _mcc_score(y_true, y_pred),
-    }
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UndefinedMetricWarning)
+        metrics = {
+            "accuracy": accuracy_score(y_true, y_pred),
+            "precision": precision_score(y_true, y_pred, average="weighted", zero_division=0),
+            "recall": recall_score(y_true, y_pred, average="weighted", zero_division=0),
+            "f1": f1_score(y_true, y_pred, average="weighted", zero_division=0),
+            "f1_macro": f1_score(y_true, y_pred, average="macro", zero_division=0),
+            "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+            "mcc": _mcc_score(y_true, y_pred),
+        }
 
     if y_score is not None:
+        y_score_array = np.asarray(y_score)
+
+        # ── ROC-AUC ──────────────────────────────────────────────────────
         try:
             with warnings.catch_warnings():
-                warnings.filterwarnings(
-                    "ignore",
-                    category=UndefinedMetricWarning,
-                )
-                y_score_array = np.asarray(y_score)
+                warnings.filterwarnings("ignore", category=UndefinedMetricWarning)
                 if y_score_array.ndim == 2 and y_score_array.shape[1] > 2:
-                    # Multi-class: use one-vs-rest AUC
                     metrics["roc_auc"] = roc_auc_score(
                         y_true, y_score_array, multi_class="ovr", average="weighted"
                     )
                 else:
-                    # Binary classification: binarize target based on pos_label if specified
                     if pos_label is not None:
                         y_true_arr = np.asarray(y_true)
                         y_true_bin = np.where(y_true_arr == pos_label, 1, 0)
@@ -99,6 +107,41 @@ def classification_metrics(
         except ValueError as exc:
             logger.warning("ROC-AUC skipped: %s", exc)
             metrics["roc_auc"] = float("nan")
+
+        # ── Log loss (all tasks with scores) ──────────────────────────────
+        try:
+            metrics["log_loss"] = float(sklearn_log_loss(y_true, y_score_array))
+        except ValueError as exc:
+            logger.warning("log_loss skipped: %s", exc)
+            metrics["log_loss"] = float("nan")
+
+        # ── Brier score + average precision (binary only) ─────────────────
+        is_binary = y_score_array.ndim == 1 or (
+            y_score_array.ndim == 2 and y_score_array.shape[1] == 2
+        )
+        if is_binary:
+            score_1d = (
+                y_score_array
+                if y_score_array.ndim == 1
+                else y_score_array[:, 1]
+            )
+            y_true_arr = np.asarray(list(y_true))
+            classes = np.unique(y_true_arr)
+            if len(classes) == 2:
+                pos = pos_label if pos_label is not None else classes[-1]
+                y_bin = (y_true_arr == pos).astype(int)
+                try:
+                    metrics["brier_score"] = float(brier_score_loss(y_bin, score_1d))
+                except ValueError as exc:
+                    logger.warning("brier_score skipped: %s", exc)
+                    metrics["brier_score"] = float("nan")
+                try:
+                    metrics["average_precision"] = float(
+                        average_precision_score(y_bin, score_1d)
+                    )
+                except ValueError as exc:
+                    logger.warning("average_precision skipped: %s", exc)
+                    metrics["average_precision"] = float("nan")
 
     return {name: float(value) for name, value in metrics.items()}
 
@@ -122,6 +165,8 @@ def regression_metrics(
         "mape": float(mean_absolute_percentage_error(y_true, y_pred)),
         "rmse": float(sqrt(mean_squared_error(y_true, y_pred))),
         "r2": float(r2_score(y_true, y_pred)),
+        "median_ae": float(sklearn_median_absolute_error(y_true, y_pred)),
+        "explained_variance": float(explained_variance_score(y_true, y_pred)),
     }
 
 
@@ -136,6 +181,7 @@ def evaluate_model(
     feature_importances_path: str | Path | None = None,
     permutation_importances_path: str | Path | None = None,
     confusion_matrix_dir: str | Path | None = None,
+    per_class_metrics_path: str | Path | None = None,
     artifacts_base_path: str | Path | None = None,
     permutation_scoring: str | None = None,
     permutation_n_repeats: int = 10,
@@ -172,10 +218,7 @@ def evaluate_model(
     dict[str, float]
         Dictionary of evaluation metrics.
     """
-    if positive_label is not None:
-        if pos_label is not None:
-            raise ValueError("Cannot specify both pos_label and positive_label.")
-        pos_label = positive_label
+    pos_label = _resolve_pos_label(pos_label, positive_label)
 
     y_pred = model.predict(x_test)
     _save_feature_importances_if_available(
@@ -201,6 +244,12 @@ def evaluate_model(
             y_test,
             y_pred,
             confusion_matrix_dir=confusion_matrix_dir,
+            artifacts_base_path=artifacts_base_path,
+        )
+        _save_per_class_metrics_if_requested(
+            y_test,
+            y_pred,
+            per_class_metrics_path=per_class_metrics_path,
             artifacts_base_path=artifacts_base_path,
         )
         y_score = _predict_scores(model, x_test, pos_label=pos_label)
@@ -528,6 +577,7 @@ def compare_models(
     feature_importances_dir: str | Path | None = None,
     permutation_importances_dir: str | Path | None = None,
     confusion_matrices_dir: str | Path | None = None,
+    per_class_metrics_dir: str | Path | None = None,
     group_metrics_dir: str | Path | None = None,
     group_values: pd.DataFrame | pd.Series | Iterable[Any] | None = None,
     artifacts_base_path: str | Path | None = None,
@@ -566,22 +616,23 @@ def compare_models(
     pd.DataFrame
         Table comparing metrics for all models.
     """
-    if positive_label is not None:
-        if pos_label is not None:
-            raise ValueError("Cannot specify both pos_label and positive_label.")
-        pos_label = positive_label
+    pos_label = _resolve_pos_label(pos_label, positive_label)
 
     results = {}
     for name, model in models.items():
         feature_importances_path = None
         if feature_importances_dir is not None:
             feature_importances_path = Path(feature_importances_dir) / f"{name}.csv"
-        
+
         permutation_importances_path = None
         if permutation_importances_dir is not None:
             permutation_importances_path = (
                 Path(permutation_importances_dir) / f"{name}.csv"
             )
+
+        _per_class_metrics_path = None
+        if per_class_metrics_dir is not None:
+            _per_class_metrics_path = Path(per_class_metrics_dir) / f"{name}.csv"
 
         if permutation_importances is not None or permutation_importances_path is not None:
             p_imp = permutation_feature_importance(
@@ -616,94 +667,43 @@ def compare_models(
             if isinstance(group_values, pd.DataFrame):
                 # Multiple cohorts
                 for col in group_values.columns:
-                    col_groups = group_values[col]
-                    breakdown = group_metric_breakdown(
-                        y_test,
-                        y_pred,
-                        col_groups,
+                    _process_single_cohort(
+                        model_name=name,
+                        col_name=col,
+                        col_groups=group_values[col],
+                        y_test=y_test,
+                        y_pred=y_pred,
                         task=task,
                         pos_label=pos_label,
+                        dest_dir=(
+                            Path(group_metrics_dir) / name / col
+                            if group_metrics_dir is not None
+                            else None
+                        ),
+                        artifacts_base_path=artifacts_base_path,
+                        group_breakdowns=group_breakdowns,
+                        fairness_metrics_dict=fairness_metrics_dict,
                     )
-                    fairness = (
-                        fairness_metrics(y_test, y_pred, col_groups, pos_label=pos_label)
-                        if task == "classification"
-                        else {}
-                    )
-
-                    if group_breakdowns is not None:
-                        if name not in group_breakdowns:
-                            group_breakdowns[name] = {}
-                        group_breakdowns[name][col] = breakdown
-
-                    if fairness_metrics_dict is not None and task == "classification":
-                        if name not in fairness_metrics_dict:
-                            fairness_metrics_dict[name] = {}
-                        fairness_metrics_dict[name][col] = fairness
-
-                    if group_metrics_dir is not None:
-                        dest_dir = Path(group_metrics_dir) / name / col
-                        if artifacts_base_path is None:
-                            save_dataframe(breakdown, dest_dir / "breakdown.csv")
-                            if fairness:
-                                save_json(fairness, dest_dir / "fairness.json")
-                        else:
-                            save_dataframe(
-                                breakdown,
-                                dest_dir / "breakdown.csv",
-                                base_path=artifacts_base_path,
-                            )
-                            if fairness:
-                                save_json(
-                                    fairness,
-                                    dest_dir / "fairness.json",
-                                    base_path=artifacts_base_path,
-                                )
             else:
                 # Single cohort (backward-compatible)
-                col_name = getattr(group_values, "name", "group")
-                if col_name is None:
-                    col_name = "group"
-                breakdown = group_metric_breakdown(
-                    y_test,
-                    y_pred,
-                    group_values,
+                col_name = getattr(group_values, "name", "group") or "group"
+                _process_single_cohort(
+                    model_name=name,
+                    col_name=col_name,
+                    col_groups=group_values,
+                    y_test=y_test,
+                    y_pred=y_pred,
                     task=task,
                     pos_label=pos_label,
+                    dest_dir=(
+                        Path(group_metrics_dir) / name
+                        if group_metrics_dir is not None
+                        else None
+                    ),
+                    artifacts_base_path=artifacts_base_path,
+                    group_breakdowns=group_breakdowns,
+                    fairness_metrics_dict=fairness_metrics_dict,
                 )
-                fairness = (
-                    fairness_metrics(y_test, y_pred, group_values, pos_label=pos_label)
-                    if task == "classification"
-                    else {}
-                )
-
-                if group_breakdowns is not None:
-                    if name not in group_breakdowns:
-                        group_breakdowns[name] = {}
-                    group_breakdowns[name][str(col_name)] = breakdown
-
-                if fairness_metrics_dict is not None and task == "classification":
-                    if name not in fairness_metrics_dict:
-                        fairness_metrics_dict[name] = {}
-                    fairness_metrics_dict[name][str(col_name)] = fairness
-
-                if group_metrics_dir is not None:
-                    dest_dir = Path(group_metrics_dir) / name
-                    if artifacts_base_path is None:
-                        save_dataframe(breakdown, dest_dir / "breakdown.csv")
-                        if fairness:
-                            save_json(fairness, dest_dir / "fairness.json")
-                    else:
-                        save_dataframe(
-                            breakdown,
-                            dest_dir / "breakdown.csv",
-                            base_path=artifacts_base_path,
-                        )
-                        if fairness:
-                            save_json(
-                                fairness,
-                                dest_dir / "fairness.json",
-                                base_path=artifacts_base_path,
-                            )
 
         results[name] = evaluate_model(
             model,
@@ -714,12 +714,78 @@ def compare_models(
             feature_importances_path=feature_importances_path,
             permutation_importances_path=permutation_importances_path,
             confusion_matrix_dir=confusion_matrix_dir,
+            per_class_metrics_path=_per_class_metrics_path,
             artifacts_base_path=artifacts_base_path,
             permutation_scoring=permutation_scoring,
             permutation_n_repeats=permutation_n_repeats,
             random_state=random_state,
         )
     return model_comparison_table(results)
+
+
+def _resolve_pos_label(pos_label: Any, positive_label: Any) -> Any:
+    """Resolve the ``positive_label`` alias into ``pos_label``.
+
+    Raises ``ValueError`` when both are provided simultaneously.
+    """
+    if positive_label is not None:
+        if pos_label is not None:
+            raise ValueError("Cannot specify both pos_label and positive_label.")
+        return positive_label
+    return pos_label
+
+
+def _process_single_cohort(
+    *,
+    model_name: str,
+    col_name: str,
+    col_groups: pd.Series,
+    y_test: pd.Series,
+    y_pred: Any,
+    task: TaskType,
+    pos_label: Any,
+    dest_dir: Path | None,
+    artifacts_base_path: str | Path | None,
+    group_breakdowns: dict[str, dict[str, pd.DataFrame]] | None,
+    fairness_metrics_dict: dict[str, dict[str, dict[str, float]]] | None,
+) -> None:
+    """Compute and optionally save breakdown + fairness metrics for one cohort column."""
+    breakdown = group_metric_breakdown(
+        y_test, y_pred, col_groups, task=task, pos_label=pos_label
+    )
+    fairness = (
+        fairness_metrics(y_test, y_pred, col_groups, pos_label=pos_label)
+        if task == "classification"
+        else {}
+    )
+
+    if group_breakdowns is not None:
+        if model_name not in group_breakdowns:
+            group_breakdowns[model_name] = {}
+        group_breakdowns[model_name][str(col_name)] = breakdown
+
+    if fairness_metrics_dict is not None and task == "classification":
+        if model_name not in fairness_metrics_dict:
+            fairness_metrics_dict[model_name] = {}
+        fairness_metrics_dict[model_name][str(col_name)] = fairness
+
+    if dest_dir is not None:
+        if artifacts_base_path is None:
+            save_dataframe(breakdown, dest_dir / "breakdown.csv")
+            if fairness:
+                save_json(fairness, dest_dir / "fairness.json")
+        else:
+            save_dataframe(
+                breakdown,
+                dest_dir / "breakdown.csv",
+                base_path=artifacts_base_path,
+            )
+            if fairness:
+                save_json(
+                    fairness,
+                    dest_dir / "fairness.json",
+                    base_path=artifacts_base_path,
+                )
 
 
 def group_metric_breakdown(
@@ -1055,3 +1121,65 @@ def _numeric_imputer_for_config(config: PreprocessingConfig) -> BaseEstimator:
     }:
         return IterativeImputer(random_state=RANDOM_STATE)
     return SimpleImputer(strategy=config.numeric_imputer_strategy)
+
+
+def per_class_metrics(
+    y_true: Iterable[Any],
+    y_pred: Iterable[Any],
+) -> pd.DataFrame:
+    """Return per-class precision, recall, F1, and support for classification.
+
+    Parameters
+    ----------
+    y_true : Iterable[Any]
+        True class labels.
+    y_pred : Iterable[Any]
+        Predicted class labels.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per class with columns: class, precision, recall, f1, support.
+    """
+    y_true_arr = np.asarray(list(y_true))
+    y_pred_arr = np.asarray(list(y_pred))
+    labels = list(unique_labels(y_true_arr, y_pred_arr))
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UndefinedMetricWarning)
+        precision, recall, f1, support = precision_recall_fscore_support(
+            y_true_arr,
+            y_pred_arr,
+            labels=labels,
+            zero_division=0,
+        )
+    return pd.DataFrame(
+        {
+            "class": labels,
+            "precision": precision.astype(float),
+            "recall": recall.astype(float),
+            "f1": f1.astype(float),
+            "support": support.astype(int),
+        }
+    )
+
+
+def _save_per_class_metrics_if_requested(
+    y_true: Iterable[Any],
+    y_pred: Iterable[Any],
+    *,
+    per_class_metrics_path: str | Path | None,
+    artifacts_base_path: str | Path | None,
+) -> None:
+    """Save per-class metrics CSV when ``per_class_metrics_path`` is set."""
+    if per_class_metrics_path is None:
+        return
+    metrics_df = per_class_metrics(y_true, y_pred)
+    if artifacts_base_path is None:
+        save_dataframe(metrics_df, per_class_metrics_path)
+    else:
+        save_dataframe(
+            metrics_df,
+            per_class_metrics_path,
+            base_path=artifacts_base_path,
+        )
+

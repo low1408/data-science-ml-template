@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -10,6 +10,11 @@ from pandas.api.types import is_bool_dtype, is_datetime64_any_dtype, is_numeric_
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_selection import (
+    SelectorMixin,
+    mutual_info_classif,
+    mutual_info_regression,
+)
 from sklearn.experimental import enable_iterative_imputer  # noqa: F401
 from sklearn.impute import KNNImputer, IterativeImputer, MissingIndicator, SimpleImputer
 from sklearn.pipeline import Pipeline
@@ -25,6 +30,7 @@ from sklearn.preprocessing import (
     StandardScaler,
     TargetEncoder,
 )
+from sklearn.utils.validation import check_array, check_is_fitted, check_X_y
 
 from src.features import FeaturePipeline, FeatureRole, SklearnFeaturePipeline
 
@@ -255,6 +261,57 @@ class FrequencyEncoder(BaseEstimator, TransformerMixin):
         return series.astype("object").where(series.notna(), self.missing_label)
 
 
+class HashingEncoder(BaseEstimator, TransformerMixin):
+    """Encode categories using feature hashing (the hashing trick).
+
+    All categorical columns are hashed into a single fixed-size dense
+    output vector of dimension ``n_features``, making it suitable for
+    high-cardinality columns where one-hot encoding would produce too
+    many output columns.
+
+    Parameters
+    ----------
+    n_features : int, default=128
+        Size of the output feature space shared across all columns.
+
+    Notes
+    -----
+    Output column names follow the pattern ``hash_0``, ``hash_1``, …,
+    ``hash_{n_features-1}``.
+    """
+
+    def __init__(self, *, n_features: int = 128) -> None:
+        self.n_features = n_features
+
+    def fit(self, X: pd.DataFrame | np.ndarray, y: Any = None) -> HashingEncoder:
+        X_df = _as_dataframe(X)
+        self.feature_names_in_ = np.asarray(X_df.columns, dtype=object)
+        return self
+
+    def transform(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
+        from sklearn.feature_extraction import FeatureHasher
+
+        X_df = _as_dataframe(X, tuple(self.feature_names_in_))
+        records = [
+            {
+                f"{col}={'' if pd.isna(val) else val}": 1
+                for col, val in zip(X_df.columns, row)
+            }
+            for row in X_df.itertuples(index=False, name=None)
+        ]
+        hasher = FeatureHasher(
+            n_features=self.n_features,
+            input_type="dict",
+            alternate_sign=False,
+        )
+        return hasher.transform(records).toarray()
+
+    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+        return np.asarray(
+            [f"hash_{i}" for i in range(self.n_features)], dtype=object
+        )
+
+
 class RareCategoryGrouper(BaseEstimator, TransformerMixin):
     """Group low-frequency categories under a stable rare-category label."""
 
@@ -439,9 +496,9 @@ class StratifiedHybridImputer(BaseEstimator, TransformerMixin):
         *,
         categorical_cols: tuple[str, ...] = (),
         numeric_cols: tuple[str, ...] = (),
-        categorical_group_cols: tuple[str, ...] = ("branch", "client_id"),
-        numeric_group_cols: tuple[str, ...] = ("client_id", "parcel_category"),
-        fallback_group_col: str = "branch",
+        categorical_group_cols: tuple[str, ...] = (),
+        numeric_group_cols: tuple[str, ...] = (),
+        fallback_group_col: str | None = None,
         min_samples: int = 1,
         add_missing_indicators: bool = True,
     ) -> None:
@@ -464,24 +521,28 @@ class StratifiedHybridImputer(BaseEstimator, TransformerMixin):
         for column in self.categorical_cols:
             if column not in X_df.columns:
                 continue
-            self.cohort_stats_[column] = X_df.groupby(list(self.categorical_group_cols))[
-                column
-            ].apply(self._mode)
-            self.fallback_stats_[column] = X_df.groupby(self.fallback_group_col)[
-                column
-            ].apply(self._mode)
+            if self.categorical_group_cols:
+                self.cohort_stats_[column] = X_df.groupby(list(self.categorical_group_cols))[
+                    column
+                ].apply(self._mode)
+            if self.fallback_group_col is not None:
+                self.fallback_stats_[column] = X_df.groupby(self.fallback_group_col)[
+                    column
+                ].apply(self._mode)
             mode = X_df[column].mode(dropna=True)
             self.global_stats_[column] = mode.iloc[0] if not mode.empty else pd.NA
 
         for column in self.numeric_cols:
             if column not in X_df.columns:
                 continue
-            self.cohort_stats_[column] = X_df.groupby(list(self.numeric_group_cols))[
-                column
-            ].apply(self._median)
-            self.fallback_stats_[column] = X_df.groupby(self.fallback_group_col)[
-                column
-            ].apply(self._median)
+            if self.numeric_group_cols:
+                self.cohort_stats_[column] = X_df.groupby(list(self.numeric_group_cols))[
+                    column
+                ].apply(self._median)
+            if self.fallback_group_col is not None:
+                self.fallback_stats_[column] = X_df.groupby(self.fallback_group_col)[
+                    column
+                ].apply(self._median)
             self.global_stats_[column] = X_df[column].median()
 
         return self
@@ -505,26 +566,39 @@ class StratifiedHybridImputer(BaseEstimator, TransformerMixin):
                 if column in self.categorical_cols
                 else self.numeric_group_cols
             )
-            lookup_cols = tuple(dict.fromkeys((*group_cols, self.fallback_group_col)))
-            temp = X_df.loc[missing_mask, list(lookup_cols)].copy()
+            # When no group columns are configured, skip cohort lookup and use global stats
+            if not group_cols:
+                imputed_values = pd.Series(
+                    self.global_stats_[column], index=X_df.index[missing_mask]
+                )
+            else:
+                lookup_cols = tuple(dict.fromkeys((*group_cols, self.fallback_group_col)))
+                temp = X_df.loc[missing_mask, [c for c in lookup_cols if c is not None]].copy()
 
-            cohort_values = temp.merge(
-                self.cohort_stats_[column].rename("cohort_value"),
-                on=list(group_cols),
-                how="left",
-            )
-            cohort_values.index = temp.index
-            fallback_values = temp.merge(
-                self.fallback_stats_[column].rename("fallback_value"),
-                on=self.fallback_group_col,
-                how="left",
-            )
-            fallback_values.index = temp.index
-            imputed_values = (
-                cohort_values["cohort_value"]
-                .fillna(fallback_values["fallback_value"])
-                .fillna(self.global_stats_[column])
-            )
+                cohort_values = temp.merge(
+                    self.cohort_stats_[column].rename("cohort_value"),
+                    on=list(group_cols),
+                    how="left",
+                )
+                cohort_values.index = temp.index
+
+                if self.fallback_group_col is not None and self.fallback_group_col in self.fallback_stats_:
+                    fallback_values = temp.merge(
+                        self.fallback_stats_[column].rename("fallback_value"),
+                        on=self.fallback_group_col,
+                        how="left",
+                    )
+                    fallback_values.index = temp.index
+                    imputed_values = (
+                        cohort_values["cohort_value"]
+                        .fillna(fallback_values["fallback_value"])
+                        .fillna(self.global_stats_[column])
+                    )
+                else:
+                    imputed_values = (
+                        cohort_values["cohort_value"]
+                        .fillna(self.global_stats_[column])
+                    )
 
             if isinstance(X_df[column].dtype, pd.CategoricalDtype):
                 for value in imputed_values.dropna().unique():
@@ -545,8 +619,9 @@ class StratifiedHybridImputer(BaseEstimator, TransformerMixin):
         required = {
             *self.categorical_group_cols,
             *self.numeric_group_cols,
-            self.fallback_group_col,
         }
+        if self.fallback_group_col is not None:
+            required.add(self.fallback_group_col)
         missing = sorted(column for column in required if column not in dataframe.columns)
         if missing:
             raise KeyError(
@@ -569,6 +644,274 @@ class StratifiedHybridImputer(BaseEstimator, TransformerMixin):
 
 
 @dataclass(frozen=True)
+class FeatureSelectionConfig:
+    enabled: bool = False
+    mutual_information: bool = False
+    vif: bool = False
+    mi_strategy: str = "percentile"
+    mi_k: int = 20
+    mi_percentile: float = 50.0
+    mi_threshold: float = 0.0
+    mi_min_features: int = 1
+    mi_random_state: int = 0
+    vif_threshold: float = 10.0
+    vif_min_features: int = 1
+    vif_max_iter: int | None = None
+    vif_max_features: int = 200
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "enabled",
+            bool(self.enabled or self.mutual_information or self.vif),
+        )
+        strategy = self.mi_strategy.lower()
+        if strategy not in {"k_best", "percentile", "threshold"}:
+            raise ValueError(
+                "feature_selection.mi_strategy must be one of: "
+                "['k_best', 'percentile', 'threshold']."
+            )
+        object.__setattr__(self, "mi_strategy", strategy)
+
+        if self.enabled and not (self.mutual_information or self.vif):
+            raise ValueError(
+                "Feature selection is enabled, but no selector is active. "
+                "Set mutual_information=true and/or vif=true."
+            )
+        if self.mi_k < 1:
+            raise ValueError("feature_selection.mi_k must be at least 1.")
+        if not 0.0 < self.mi_percentile <= 100.0:
+            raise ValueError(
+                "feature_selection.mi_percentile must satisfy 0.0 < percentile <= 100.0."
+            )
+        if self.mi_min_features < 1:
+            raise ValueError("feature_selection.mi_min_features must be at least 1.")
+        if self.vif_threshold < 1.0:
+            raise ValueError("feature_selection.vif_threshold must be at least 1.0.")
+        if self.vif_min_features < 1:
+            raise ValueError("feature_selection.vif_min_features must be at least 1.")
+        if self.vif_max_iter is not None and self.vif_max_iter < 1:
+            raise ValueError("feature_selection.vif_max_iter must be at least 1.")
+        if self.vif_max_features < 1:
+            raise ValueError("feature_selection.vif_max_features must be at least 1.")
+
+
+class MISelector(BaseEstimator, SelectorMixin):
+    """Select post-preprocessing features by univariate mutual information."""
+
+    def __init__(
+        self,
+        *,
+        task: str,
+        strategy: str = "percentile",
+        k: int = 20,
+        percentile: float = 50.0,
+        threshold: float = 0.0,
+        min_features: int = 1,
+        random_state: int = 0,
+        discrete_features: str | bool | list[bool] = "auto",
+    ) -> None:
+        self.task = task
+        self.strategy = strategy
+        self.k = k
+        self.percentile = percentile
+        self.threshold = threshold
+        self.min_features = min_features
+        self.random_state = random_state
+        self.discrete_features = discrete_features
+
+    def fit(self, X: Any, y: Any = None) -> MISelector:
+        self._validate_parameters()
+        if y is None:
+            raise ValueError("MISelector requires y during fit.")
+        X_checked, y_checked = check_X_y(
+            X,
+            y,
+            accept_sparse=("csr", "csc"),
+            dtype=float,
+        )
+        self.n_features_in_ = X_checked.shape[1]
+
+        if self.task == "classification":
+            scores = mutual_info_classif(
+                X_checked,
+                y_checked,
+                discrete_features=self.discrete_features,
+                random_state=self.random_state,
+            )
+        elif self.task == "regression":
+            scores = mutual_info_regression(
+                X_checked,
+                y_checked,
+                discrete_features=self.discrete_features,
+                random_state=self.random_state,
+            )
+        else:
+            raise ValueError("MISelector task must be 'classification' or 'regression'.")
+
+        self.scores_ = np.nan_to_num(np.asarray(scores, dtype=float), nan=0.0)
+        self.support_ = self._build_support_mask(self.scores_)
+        return self
+
+    def _get_support_mask(self) -> np.ndarray:
+        check_is_fitted(self, "support_")
+        return self.support_
+
+    def _validate_parameters(self) -> None:
+        strategy = self.strategy.lower()
+        if strategy not in {"k_best", "percentile", "threshold"}:
+            raise ValueError(
+                "MISelector strategy must be one of: "
+                "['k_best', 'percentile', 'threshold']."
+            )
+        self.strategy_ = strategy
+        if self.k < 1:
+            raise ValueError("MISelector k must be at least 1.")
+        if not 0.0 < self.percentile <= 100.0:
+            raise ValueError("MISelector percentile must satisfy 0.0 < percentile <= 100.0.")
+        if self.min_features < 1:
+            raise ValueError("MISelector min_features must be at least 1.")
+
+    def _build_support_mask(self, scores: np.ndarray) -> np.ndarray:
+        n_features = len(scores)
+        min_features = min(self.min_features, n_features)
+        if self.strategy_ == "k_best":
+            selection_count = min(self.k, n_features)
+            self.selection_threshold_ = None
+        elif self.strategy_ == "percentile":
+            selection_count = int(np.ceil(n_features * (self.percentile / 100.0)))
+            selection_count = min(max(selection_count, min_features), n_features)
+            self.selection_threshold_ = None
+        else:
+            mask = scores >= self.threshold
+            if int(mask.sum()) < min_features:
+                mask = self._top_k_mask(scores, min_features)
+            self.selection_threshold_ = float(self.threshold)
+            self.selection_count_ = int(mask.sum())
+            return mask
+
+        selection_count = max(selection_count, min_features)
+        self.selection_count_ = int(selection_count)
+        return self._top_k_mask(scores, selection_count)
+
+    def _top_k_mask(self, scores: np.ndarray, k: int) -> np.ndarray:
+        order = np.argsort(-scores, kind="mergesort")
+        mask = np.zeros(len(scores), dtype=bool)
+        mask[order[:k]] = True
+        return mask
+
+
+class IterativeVIFSelector(BaseEstimator, SelectorMixin):
+    """Iteratively drop features whose VIF exceeds a configured threshold."""
+
+    def __init__(
+        self,
+        *,
+        threshold: float = 10.0,
+        min_features: int = 1,
+        max_iter: int | None = None,
+        max_features: int = 200,
+    ) -> None:
+        self.threshold = threshold
+        self.min_features = min_features
+        self.max_iter = max_iter
+        self.max_features = max_features
+
+    def fit(self, X: Any, y: Any = None) -> IterativeVIFSelector:
+        self._validate_parameters()
+        X_checked = check_array(X, accept_sparse=("csr", "csc"), dtype=float)
+        self.n_features_in_ = X_checked.shape[1]
+        if self.n_features_in_ > self.max_features:
+            raise ValueError(
+                "IterativeVIFSelector received "
+                f"{self.n_features_in_} features, which exceeds max_features="
+                f"{self.max_features}. Reduce dimensionality first or raise "
+                "feature_selection.vif_max_features."
+            )
+
+        values = self._as_dense_array(X_checked)
+        support = np.ones(self.n_features_in_, dtype=bool)
+        self.vif_scores_ = np.full(self.n_features_in_, np.nan, dtype=float)
+        self.vif_history_: list[dict[str, Any]] = []
+
+        iteration = 0
+        while int(support.sum()) > self.min_features:
+            if self.max_iter is not None and iteration >= self.max_iter:
+                break
+            selected_indices = np.flatnonzero(support)
+            current_vifs = self._calculate_vifs(values[:, selected_indices])
+            self.vif_scores_[selected_indices] = current_vifs
+
+            max_position = int(np.nanargmax(current_vifs))
+            max_vif = float(current_vifs[max_position])
+            drop_index = int(selected_indices[max_position])
+            should_drop = max_vif > self.threshold
+            self.vif_history_.append(
+                {
+                    "iteration": iteration,
+                    "feature_index": drop_index,
+                    "vif": max_vif,
+                    "dropped": bool(should_drop),
+                }
+            )
+            if not should_drop:
+                break
+            support[drop_index] = False
+            iteration += 1
+
+        if int(support.sum()) > 1:
+            selected_indices = np.flatnonzero(support)
+            self.vif_scores_[selected_indices] = self._calculate_vifs(
+                values[:, selected_indices]
+            )
+        self.support_ = support
+        self.selection_threshold_ = float(self.threshold)
+        return self
+
+    def _get_support_mask(self) -> np.ndarray:
+        check_is_fitted(self, "support_")
+        return self.support_
+
+    def _validate_parameters(self) -> None:
+        if self.threshold < 1.0:
+            raise ValueError("IterativeVIFSelector threshold must be at least 1.0.")
+        if self.min_features < 1:
+            raise ValueError("IterativeVIFSelector min_features must be at least 1.")
+        if self.max_iter is not None and self.max_iter < 1:
+            raise ValueError("IterativeVIFSelector max_iter must be at least 1.")
+        if self.max_features < 1:
+            raise ValueError("IterativeVIFSelector max_features must be at least 1.")
+
+    def _as_dense_array(self, X: Any) -> np.ndarray:
+        from scipy import sparse
+
+        if sparse.issparse(X):
+            return X.toarray()
+        return np.asarray(X, dtype=float)
+
+    def _calculate_vifs(self, values: np.ndarray) -> np.ndarray:
+        n_features = values.shape[1]
+        if n_features == 1:
+            return np.ones(1, dtype=float)
+
+        vifs = np.empty(n_features, dtype=float)
+        for idx in range(n_features):
+            target = values[:, idx]
+            predictors = np.delete(values, idx, axis=1)
+            predictors = np.column_stack([np.ones(len(predictors)), predictors])
+            try:
+                coefficients, *_ = np.linalg.lstsq(predictors, target, rcond=None)
+                fitted = predictors @ coefficients
+                ss_res = float(np.sum((target - fitted) ** 2))
+                ss_tot = float(np.sum((target - np.mean(target)) ** 2))
+                r2 = 1.0 - ss_res / ss_tot if ss_tot > 0.0 else 1.0
+                vifs[idx] = float("inf") if r2 >= 1.0 else float(1.0 / (1.0 - r2))
+            except np.linalg.LinAlgError:
+                vifs[idx] = float("inf")
+        return vifs
+
+
+@dataclass(frozen=True)
 class PreprocessingConfig:
     feature_columns: FeatureColumns
     imputer: str = "simple"
@@ -583,6 +926,8 @@ class PreprocessingConfig:
     numeric_binning: str = "none"
     numeric_bin_count: int = 10
     categorical_encoding: str = "onehot"
+    categorical_onehot_max_cardinality: int = 10
+    hashing_n_features: int = 128
     group_rare_categories: bool = False
     rare_category_min_frequency: float = 0.01
     frequency_unknown_value: float = 0.0
@@ -595,47 +940,53 @@ class PreprocessingConfig:
     text_max_features: int = 1000
     stratified_categorical_columns: tuple[str, ...] | None = None
     stratified_numeric_columns: tuple[str, ...] | None = None
-    stratified_categorical_group_cols: tuple[str, ...] = ("branch", "client_id")
-    stratified_numeric_group_cols: tuple[str, ...] = ("client_id", "parcel_category")
-    stratified_fallback_group_col: str = "branch"
+    stratified_categorical_group_cols: tuple[str, ...] = ()
+    stratified_numeric_group_cols: tuple[str, ...] = ()
+    stratified_fallback_group_col: str | None = None
     stratified_min_samples: int = 1
     add_missing_indicators: bool = True
+    feature_selection: FeatureSelectionConfig = field(default_factory=FeatureSelectionConfig)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "imputer", self.imputer.lower())
-        if self.imputer not in {"simple", "stratified_hybrid", "knn", "iterative"}:
-            raise ValueError(
-                "imputer must be one of: 'simple', 'stratified_hybrid', 'knn', 'iterative'."
+        def _validate_enum(
+            field_name: str,
+            value: str,
+            allowed: set[str],
+            *,
+            error_msg: str | None = None,
+        ) -> None:
+            normed = value.lower()
+            if normed not in allowed:
+                label = error_msg or f"{field_name} must be one of: {sorted(allowed)}."
+                raise ValueError(label)
+            object.__setattr__(self, field_name, normed)
+
+        if isinstance(self.feature_selection, dict):
+            object.__setattr__(
+                self,
+                "feature_selection",
+                FeatureSelectionConfig(**self.feature_selection),
             )
-        object.__setattr__(self, "numeric_scaler", self.numeric_scaler.lower())
-        if self.numeric_scaler not in {"none", "standard", "robust", "minmax"}:
-            raise ValueError(
-                "numeric_scaler must be one of: 'none', 'standard', 'robust', 'minmax'."
-            )
-        object.__setattr__(
-            self,
+        _validate_enum(
+            "imputer",
+            self.imputer,
+            {"simple", "stratified_hybrid", "knn", "iterative"},
+        )
+        _validate_enum(
+            "numeric_scaler",
+            self.numeric_scaler,
+            {"none", "standard", "robust", "minmax"},
+        )
+        _validate_enum(
             "numeric_power_transform",
-            self.numeric_power_transform.lower(),
+            self.numeric_power_transform,
+            {"none", "yeo_johnson", "box_cox"},
         )
-        if self.numeric_power_transform not in {"none", "yeo_johnson", "box_cox"}:
-            raise ValueError(
-                "numeric_power_transform must be one of: "
-                "'none', 'yeo_johnson', 'box_cox'."
-            )
-        object.__setattr__(
-            self,
+        _validate_enum(
             "numeric_distribution_transform",
-            self.numeric_distribution_transform.lower(),
+            self.numeric_distribution_transform,
+            {"none", "quantile_uniform", "quantile_normal"},
         )
-        if self.numeric_distribution_transform not in {
-            "none",
-            "quantile_uniform",
-            "quantile_normal",
-        }:
-            raise ValueError(
-                "numeric_distribution_transform must be one of: "
-                "'none', 'quantile_uniform', 'quantile_normal'."
-            )
         if (
             self.numeric_power_transform != "none"
             and self.numeric_distribution_transform != "none"
@@ -644,29 +995,24 @@ class PreprocessingConfig:
                 "numeric_power_transform and numeric_distribution_transform "
                 "are mutually exclusive."
             )
-        object.__setattr__(self, "numeric_binning", self.numeric_binning.lower())
-        if self.numeric_binning not in {"none", "uniform", "quantile", "kmeans"}:
-            raise ValueError(
-                "numeric_binning must be one of: "
-                "'none', 'uniform', 'quantile', 'kmeans'."
-            )
+        _validate_enum(
+            "numeric_binning",
+            self.numeric_binning,
+            {"none", "uniform", "quantile", "kmeans"},
+        )
         if self.numeric_bin_count < 2:
             raise ValueError("numeric_bin_count must be at least 2.")
-        object.__setattr__(
-            self,
+        _validate_enum(
             "categorical_encoding",
-            self.categorical_encoding.lower(),
+            self.categorical_encoding,
+            {"onehot", "frequency", "ordinal", "target", "hashing"},
         )
-        if self.categorical_encoding not in {
-            "onehot",
-            "frequency",
-            "ordinal",
-            "target",
-        }:
+        if self.categorical_onehot_max_cardinality < 0:
             raise ValueError(
-                "categorical_encoding must be one of: "
-                "'onehot', 'frequency', 'ordinal', 'target'."
+                "categorical_onehot_max_cardinality must be >= 0 (0 disables the warning)."
             )
+        if self.hashing_n_features < 1:
+            raise ValueError("hashing_n_features must be at least 1.")
         if not 0.0 <= self.quantile_cap_lower < self.quantile_cap_upper <= 1.0:
             raise ValueError(
                 "Quantile caps require "
@@ -706,143 +1052,63 @@ def build_preprocessor(
 ) -> ColumnTransformer:
     _validate_feature_columns(dataframe, config.feature_columns)
 
+    # ── Cardinality warning for one-hot encoding ───────────────────────────
+    if (
+        config.categorical_encoding == "onehot"
+        and config.categorical_onehot_max_cardinality > 0
+        and config.feature_columns.categorical
+    ):
+        import warnings as _warnings
+
+        for col in config.feature_columns.categorical:
+            if col in dataframe.columns:
+                n_unique = int(dataframe[col].nunique(dropna=True))
+                if n_unique > config.categorical_onehot_max_cardinality:
+                    _warnings.warn(
+                        f"Column '{col}' has {n_unique} unique values and will be "
+                        f"one-hot encoded, producing {n_unique} output columns. "
+                        f"Consider 'hashing', 'frequency', or 'target' encoding for "
+                        f"high-cardinality columns "
+                        f"(categorical_onehot_max_cardinality="
+                        f"{config.categorical_onehot_max_cardinality}).",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+
     use_simple_imputer = config.imputer in {"simple", "knn", "iterative"}
-    numeric_steps: list[tuple[str, object]] = []
-    if use_simple_imputer:
-        if config.imputer == "knn" or config.numeric_imputer_strategy == "knn":
-            numeric_steps.append(("imputer", KNNImputer()))
-        elif config.imputer == "iterative" or config.numeric_imputer_strategy in {"iterative", "mice"}:
-            numeric_steps.append(("imputer", IterativeImputer(random_state=0)))
-        else:
-            numeric_steps.append(
-                ("imputer", SimpleImputer(strategy=config.numeric_imputer_strategy))
-            )
-    if config.cap_numeric_quantiles:
-        numeric_steps.append(
-            (
-                "quantile_capper",
-                QuantileCapper(
-                    lower_quantile=config.quantile_cap_lower,
-                    upper_quantile=config.quantile_cap_upper,
-                ),
-            )
-        )
-    if config.numeric_power_transform == "yeo_johnson":
-        numeric_steps.append(
-            ("power", PowerTransformer(method="yeo-johnson", standardize=False))
-        )
-    elif config.numeric_power_transform == "box_cox":
-        numeric_steps.append(("power", PositiveBoxCoxTransformer(standardize=False)))
-    if config.numeric_distribution_transform != "none":
-        distribution = (
-            "normal"
-            if config.numeric_distribution_transform == "quantile_normal"
-            else "uniform"
-        )
-        n_quantiles = min(config.quantile_transform_n_quantiles, len(dataframe))
-        numeric_steps.append(
-            (
-                "distribution",
-                QuantileTransformer(
-                    n_quantiles=n_quantiles,
-                    output_distribution=distribution,
-                    random_state=0,
-                ),
-            )
-        )
-    if config.numeric_binning != "none":
-        numeric_steps.append(
-            (
-                "binning",
-                KBinsDiscretizer(
-                    n_bins=config.numeric_bin_count,
-                    encode="onehot-dense",
-                    strategy=config.numeric_binning,
-                ),
-            )
-        )
-    scaler = _numeric_scaler(config)
-    if scaler is not None:
-        numeric_steps.append(("scaler", scaler))
-    if not numeric_steps:
-        numeric_steps.append(("identity", FunctionTransformer()))
-
-    categorical_steps: list[tuple[str, object]] = []
-    if use_simple_imputer:
-        categorical_steps.append(
-            ("imputer", SimpleImputer(strategy=config.categorical_imputer_strategy))
-        )
-    if config.group_rare_categories:
-        categorical_steps.append(
-            (
-                "rare_categories",
-                RareCategoryGrouper(
-                    min_frequency=config.rare_category_min_frequency
-                ),
-            )
-        )
-    if config.categorical_encoding == "onehot":
-        categorical_steps.append(("onehot", OneHotEncoder(handle_unknown="ignore")))
-    elif config.categorical_encoding == "frequency":
-        categorical_steps.append(
-            (
-                "frequency",
-                FrequencyEncoder(unknown_value=config.frequency_unknown_value),
-            )
-        )
-    elif config.categorical_encoding == "ordinal":
-        categorical_steps.append(
-            (
-                "ordinal",
-                OrdinalEncoder(
-                    handle_unknown="use_encoded_value",
-                    unknown_value=-1,
-                    encoded_missing_value=-2,
-                ),
-            )
-        )
-    else:
-        categorical_steps.append(("target", TargetEncoder()))
-
-    categorical_pipeline = Pipeline(steps=categorical_steps)
-    boolean_steps: list[tuple[str, object]] = [
-        ("encoder", BooleanMappingTransformer(mapping=config.boolean_mapping)),
-        ("to_object", FunctionTransformer(_cast_to_object)),
-        ("imputer", SimpleImputer(strategy=config.boolean_imputer_strategy)),
-        ("to_int", FunctionTransformer(_cast_to_int)),
-    ]
-    boolean_pipeline = Pipeline(steps=boolean_steps)
-    datetime_pipeline = Pipeline(
-        steps=[
-            ("extractor", DateTimeFeatureExtractor()),
-            ("imputer", SimpleImputer(strategy="median")),
-        ]
-    )
-    text_pipeline = Pipeline(
-        steps=[
-            ("tfidf", MultiColumnTfidfVectorizer(max_features=config.text_max_features)),
-        ]
-    )
 
     transformers: list[tuple[str, Pipeline, list[str] | tuple[str, ...]]] = []
     if config.feature_columns.numeric:
         transformers.append(
-            ("numeric", Pipeline(numeric_steps), config.feature_columns.numeric)
+            ("numeric", Pipeline(_build_numeric_steps(config, len(dataframe), use_simple_imputer)), config.feature_columns.numeric)
         )
     if config.feature_columns.categorical:
         transformers.append(
-            ("categorical", categorical_pipeline, config.feature_columns.categorical)
+            ("categorical", Pipeline(_build_categorical_steps(config, use_simple_imputer)), config.feature_columns.categorical)
         )
     if config.feature_columns.boolean:
         transformers.append(
-            ("boolean", boolean_pipeline, config.feature_columns.boolean)
+            ("boolean", Pipeline(_build_boolean_steps(config)), config.feature_columns.boolean)
         )
     if config.feature_columns.datetime:
         transformers.append(
-            ("datetime", datetime_pipeline, config.feature_columns.datetime)
+            (
+                "datetime",
+                Pipeline([
+                    ("extractor", DateTimeFeatureExtractor()),
+                    ("imputer", SimpleImputer(strategy="median")),
+                ]),
+                config.feature_columns.datetime,
+            )
         )
     if config.feature_columns.text:
-        transformers.append(("text", text_pipeline, config.feature_columns.text))
+        transformers.append(
+            (
+                "text",
+                Pipeline([("tfidf", MultiColumnTfidfVectorizer(max_features=config.text_max_features))]),
+                config.feature_columns.text,
+            )
+        )
     indicator_columns = _stratified_indicator_columns(config)
     if indicator_columns:
         transformers.append(
@@ -863,6 +1129,111 @@ def build_preprocessor(
         )
 
     return ColumnTransformer(transformers=transformers, remainder=config.remainder)
+
+
+def _build_numeric_steps(
+    config: PreprocessingConfig,
+    n_rows: int,
+    use_simple_imputer: bool,
+) -> list[tuple[str, object]]:
+    """Build the ordered transformer steps for the numeric pipeline."""
+    steps: list[tuple[str, object]] = []
+    if use_simple_imputer:
+        if config.imputer == "knn" or config.numeric_imputer_strategy == "knn":
+            steps.append(("imputer", KNNImputer()))
+        elif config.imputer == "iterative" or config.numeric_imputer_strategy in {"iterative", "mice"}:
+            steps.append(("imputer", IterativeImputer(random_state=0)))
+        else:
+            steps.append(("imputer", SimpleImputer(strategy=config.numeric_imputer_strategy)))
+    if config.cap_numeric_quantiles:
+        steps.append((
+            "quantile_capper",
+            QuantileCapper(
+                lower_quantile=config.quantile_cap_lower,
+                upper_quantile=config.quantile_cap_upper,
+            ),
+        ))
+    if config.numeric_power_transform == "yeo_johnson":
+        steps.append(("power", PowerTransformer(method="yeo-johnson", standardize=False)))
+    elif config.numeric_power_transform == "box_cox":
+        steps.append(("power", PositiveBoxCoxTransformer(standardize=False)))
+    if config.numeric_distribution_transform != "none":
+        distribution = (
+            "normal"
+            if config.numeric_distribution_transform == "quantile_normal"
+            else "uniform"
+        )
+        steps.append((
+            "distribution",
+            QuantileTransformer(
+                n_quantiles=min(config.quantile_transform_n_quantiles, n_rows),
+                output_distribution=distribution,
+                random_state=0,
+            ),
+        ))
+    if config.numeric_binning != "none":
+        steps.append((
+            "binning",
+            KBinsDiscretizer(
+                n_bins=config.numeric_bin_count,
+                encode="onehot-dense",
+                strategy=config.numeric_binning,
+            ),
+        ))
+    scaler = _numeric_scaler(config)
+    if scaler is not None:
+        steps.append(("scaler", scaler))
+    if not steps:
+        steps.append(("identity", FunctionTransformer()))
+    return steps
+
+
+def _build_categorical_steps(
+    config: PreprocessingConfig,
+    use_simple_imputer: bool,
+) -> list[tuple[str, object]]:
+    """Build the ordered transformer steps for the categorical pipeline."""
+    steps: list[tuple[str, object]] = []
+    if use_simple_imputer:
+        steps.append(("imputer", SimpleImputer(strategy=config.categorical_imputer_strategy)))
+    if config.group_rare_categories:
+        steps.append((
+            "rare_categories",
+            RareCategoryGrouper(min_frequency=config.rare_category_min_frequency),
+        ))
+    if config.categorical_encoding == "onehot":
+        steps.append(("onehot", OneHotEncoder(handle_unknown="ignore")))
+    elif config.categorical_encoding == "frequency":
+        steps.append((
+            "frequency",
+            FrequencyEncoder(unknown_value=config.frequency_unknown_value),
+        ))
+    elif config.categorical_encoding == "ordinal":
+        steps.append((
+            "ordinal",
+            OrdinalEncoder(
+                handle_unknown="use_encoded_value",
+                unknown_value=-1,
+                encoded_missing_value=-2,
+            ),
+        ))
+    elif config.categorical_encoding == "hashing":
+        steps.append(("hashing", HashingEncoder(n_features=config.hashing_n_features)))
+    else:
+        steps.append(("target", TargetEncoder()))
+    return steps
+
+
+def _build_boolean_steps(
+    config: PreprocessingConfig,
+) -> list[tuple[str, object]]:
+    """Build the ordered transformer steps for the boolean pipeline."""
+    return [
+        ("encoder", BooleanMappingTransformer(mapping=config.boolean_mapping)),
+        ("to_object", FunctionTransformer(_cast_to_object)),
+        ("imputer", SimpleImputer(strategy=config.boolean_imputer_strategy)),
+        ("to_int", FunctionTransformer(_cast_to_int)),
+    ]
 
 
 def _numeric_scaler(config: PreprocessingConfig) -> object | None:
@@ -937,6 +1308,7 @@ def build_model_pipeline(
     *,
     config: PreprocessingConfig,
     feature_pipeline: FeaturePipeline | None = None,
+    task: str | None = None,
 ) -> Pipeline:
     steps: list[tuple[str, Any]] = []
     if feature_pipeline is not None:
@@ -955,9 +1327,55 @@ def build_model_pipeline(
                 config=config,
             ),
         ),
-        ("model", estimator),
     ])
+    steps.extend(build_feature_selection_steps(config=config, task=task))
+    steps.append(("model", estimator))
     return Pipeline(steps=steps)
+
+
+def build_feature_selection_steps(
+    *,
+    config: PreprocessingConfig,
+    task: str | None = None,
+) -> list[tuple[str, Any]]:
+    selection = config.feature_selection
+    if not selection.enabled:
+        return []
+
+    steps: list[tuple[str, Any]] = []
+    if selection.mutual_information:
+        if task not in {"classification", "regression"}:
+            raise ValueError(
+                "Mutual-information feature selection requires task to be "
+                "'classification' or 'regression'."
+            )
+        steps.append(
+            (
+                "feature_selection_mi",
+                MISelector(
+                    task=task,
+                    strategy=selection.mi_strategy,
+                    k=selection.mi_k,
+                    percentile=selection.mi_percentile,
+                    threshold=selection.mi_threshold,
+                    min_features=selection.mi_min_features,
+                    random_state=selection.mi_random_state,
+                ),
+            )
+        )
+    if selection.vif:
+        steps.append(
+            (
+                "feature_selection_vif",
+                IterativeVIFSelector(
+                    threshold=selection.vif_threshold,
+                    min_features=selection.vif_min_features,
+                    max_iter=selection.vif_max_iter,
+                    max_features=selection.vif_max_features,
+                ),
+            )
+        )
+    return steps
 
 
 def with_feature_pipeline_columns(
